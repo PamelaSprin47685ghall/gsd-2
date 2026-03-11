@@ -26,7 +26,6 @@ export default function (pi: ExtensionAPI) {
 
 	let active = false;
 	let recognizerProcess: ChildProcess | null = null;
-	let finalized = "";
 	let flashOn = true;
 	let flashTimer: ReturnType<typeof setInterval> | null = null;
 	let footerTui: { requestRender: () => void } | null = null;
@@ -122,7 +121,6 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		active = true;
-		finalized = "";
 		setVoiceFooter(ctx, true);
 		await runVoiceSession(ctx);
 	}
@@ -161,14 +159,15 @@ export default function (pi: ExtensionAPI) {
 
 	async function runVoiceSession(ctx: ExtensionContext): Promise<void> {
 		return new Promise<void>((resolve) => {
+			// The Swift recognizer handles accumulation across pause-induced
+			// transcription resets. Both PARTIAL and FINAL messages contain
+			// the full accumulated text, so we just pass them through.
 			startRecognizer(
 				(text) => {
-					const full = finalized + (finalized && text ? " " : "") + text;
-					ctx.ui.setEditorText(full);
+					ctx.ui.setEditorText(text);
 				},
 				(text) => {
-					finalized = (finalized ? finalized + " " : "") + text;
-					ctx.ui.setEditorText(finalized);
+					ctx.ui.setEditorText(text);
 				},
 				(msg) => ctx.ui.notify(`Voice: ${msg}`, "error"),
 				() => {},
