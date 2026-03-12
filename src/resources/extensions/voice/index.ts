@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { shortcutDesc } from "../shared/terminal.js";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import { isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
@@ -131,7 +132,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerShortcut("ctrl+alt+v", {
-		description: "Toggle voice mode",
+		description: shortcutDesc("Toggle voice mode", "/voice"),
 		handler: async (ctx) => toggleVoice(ctx),
 	});
 
