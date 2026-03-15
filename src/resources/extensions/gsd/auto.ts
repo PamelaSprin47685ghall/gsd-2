@@ -17,7 +17,7 @@ import type {
 } from "@gsd/pi-coding-agent";
 
 import { deriveState, invalidateStateCache } from "./state.js";
-import type { GSDState } from "./types.js";
+import type { BudgetEnforcementMode, GSDState } from "./types.js";
 import { loadFile, parseContinue, parsePlan, parseRoadmap, parseSummary, extractUatType, inlinePriorMilestoneSummary, getManifestStatus, clearParseCache } from "./files.js";
 export { inlinePriorMilestoneSummary };
 import type { UatType } from "./files.js";
@@ -42,6 +42,7 @@ import {
   writeUnitRuntimeRecord,
 } from "./unit-runtime.js";
 import { resolveAutoSupervisorConfig, resolveModelForUnit, resolveModelWithFallbacksForUnit, resolveSkillDiscoveryMode, loadEffectiveGSDPreferences } from "./preferences.js";
+import { sendDesktopNotification } from "./notifications.js";
 import type { GSDPreferences } from "./preferences.js";
 import {
   checkPostUnitHooks,
@@ -69,22 +70,20 @@ import {
   getProjectTotals, formatCost, formatTokenCount,
 } from "./metrics.js";
 import { dirname, join } from "node:path";
-import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { sep as pathSep } from "node:path";
+import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync, renameSync, statSync } from "node:fs";
 import { execSync, execFileSync } from "node:child_process";
 import {
   autoCommitCurrentBranch,
   captureIntegrationBranch,
-  ensureSliceBranch,
+  detectWorktreeName,
   getCurrentBranch,
   getMainBranch,
   MergeConflictError,
   parseSliceBranch,
   setActiveMilestoneId,
-  switchToMain,
-  mergeSliceToMain,
 } from "./worktree.js";
 import { GitServiceImpl, runGit } from "./git-service.js";
-import { nativeCommitCountBetween } from "./native-git-bridge.js";
 import { getPriorSliceCompletionBlocker } from "./dispatch-guard.js";
 import { formatGitError } from "./git-self-heal.js";
 import {
@@ -94,10 +93,7 @@ import {
   isInAutoWorktree,
   getAutoWorktreePath,
   getAutoWorktreeOriginalBase,
-  mergeSliceToMilestone,
   mergeMilestoneToMain,
-  shouldUseWorktreeIsolation,
-  getMergeToMainMode,
 } from "./auto-worktree.js";
 import type { GitPreferences } from "./git-service.js";
 import { truncateToWidth, visibleWidth } from "@gsd/pi-tui";
@@ -122,7 +118,10 @@ function persistCompletedKey(base: string, key: string): void {
   } catch { /* corrupt file — start fresh */ }
   if (!keys.includes(key)) {
     keys.push(key);
-    writeFileSync(file, JSON.stringify(keys), "utf-8");
+    // Atomic write: tmp file + rename prevents partial writes on crash
+    const tmpFile = file + ".tmp";
+    writeFileSync(tmpFile, JSON.stringify(keys), "utf-8");
+    renameSync(tmpFile, file);
   }
 }
 
@@ -188,6 +187,7 @@ let currentUnit: { type: string; id: string; startedAt: number } | null = null;
 
 /** Track current milestone to detect transitions */
 let currentMilestoneId: string | null = null;
+let lastBudgetAlertLevel: BudgetAlertLevel = 0;
 
 /** Model the user had selected before auto-mode started */
 let originalModelId: string | null = null;
@@ -208,6 +208,31 @@ const DISPATCH_GAP_TIMEOUT_MS = 5_000; // 5 seconds
 
 /** SIGTERM handler registered while auto-mode is active — cleared on stop/pause. */
 let _sigtermHandler: (() => void) | null = null;
+
+type BudgetAlertLevel = 0 | 75 | 90 | 100;
+
+export function getBudgetAlertLevel(budgetPct: number): BudgetAlertLevel {
+  if (budgetPct >= 1.0) return 100;
+  if (budgetPct >= 0.90) return 90;
+  if (budgetPct >= 0.75) return 75;
+  return 0;
+}
+
+export function getNewBudgetAlertLevel(previousLevel: BudgetAlertLevel, budgetPct: number): BudgetAlertLevel | null {
+  const currentLevel = getBudgetAlertLevel(budgetPct);
+  if (currentLevel === 0 || currentLevel <= previousLevel) return null;
+  return currentLevel;
+}
+
+export function getBudgetEnforcementAction(
+  enforcement: BudgetEnforcementMode,
+  budgetPct: number,
+): "none" | "warn" | "pause" | "halt" {
+  if (budgetPct < 1.0) return "none";
+  if (enforcement === "halt") return "halt";
+  if (enforcement === "pause") return "pause";
+  return "warn";
+}
 
 /**
  * Register a SIGTERM handler that clears the lock file and exits cleanly.
@@ -337,10 +362,12 @@ function startDispatchGapWatchdog(ctx: ExtensionContext, pi: ExtensionAPI): void
 
     // Auto-mode is active but no unit was dispatched — the state machine stalled.
     // Re-derive state and attempt a fresh dispatch.
-    ctx.ui.notify(
-      "Dispatch gap detected — no unit dispatched after previous unit completed. Re-evaluating state.",
-      "warning",
-    );
+    if (verbose) {
+      ctx.ui.notify(
+        "Dispatch gap detected — re-evaluating state.",
+        "info",
+      );
+    }
 
     try {
       await dispatchNextUnit(ctx, pi);
@@ -360,6 +387,8 @@ export async function stopAuto(ctx?: ExtensionContext, pi?: ExtensionAPI): Promi
   clearUnitTimeout();
   if (basePath) clearLock(basePath);
   clearSkillSnapshot();
+  _dispatching = false;
+  _skipDepth = 0;
 
   // Remove SIGTERM handler registered at auto-mode start
   deregisterSigtermHandler();
@@ -408,6 +437,7 @@ export async function stopAuto(ctx?: ExtensionContext, pi?: ExtensionAPI): Promi
   stepMode = false;
   unitDispatchCount.clear();
   unitRecoveryCount.clear();
+  lastBudgetAlertLevel = 0;
   unitLifetimeDispatches.clear();
   currentUnit = null;
   currentMilestoneId = null;
@@ -468,133 +498,38 @@ async function selfHealRuntimeRecords(base: string, ctx: ExtensionContext): Prom
     const { listUnitRuntimeRecords } = await import("./unit-runtime.js");
     const records = listUnitRuntimeRecords(base);
     let healed = 0;
+    const STALE_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
+    const now = Date.now();
     for (const record of records) {
       const { unitType, unitId } = record;
       const artifactPath = resolveExpectedArtifactPath(unitType, unitId, base);
+
+      // Case 1: Artifact exists — unit completed but closeout didn't finish
       if (artifactPath && existsSync(artifactPath)) {
-        // Artifact exists — unit completed but closeout didn't finish.
+        clearUnitRuntimeRecord(base, unitType, unitId);
+        // Also persist completion key if missing
+        const key = `${unitType}/${unitId}`;
+        if (!completedKeySet.has(key)) {
+          persistCompletedKey(base, key);
+          completedKeySet.add(key);
+        }
+        healed++;
+        continue;
+      }
+
+      // Case 2: No artifact but record is stale (dispatched > 1h ago, process crashed)
+      const age = now - (record.startedAt ?? 0);
+      if (record.phase === "dispatched" && age > STALE_THRESHOLD_MS) {
         clearUnitRuntimeRecord(base, unitType, unitId);
         healed++;
+        continue;
       }
     }
     if (healed > 0) {
-      ctx.ui.notify(`Self-heal: cleared ${healed} stale runtime record(s) with completed artifacts.`, "info");
+      ctx.ui.notify(`Self-heal: cleared ${healed} stale runtime record(s).`, "info");
     }
   } catch {
     // Non-fatal — self-heal should never block auto-mode start
-  }
-}
-
-/**
- * Startup check: scan for orphaned completed slice branches and merge them.
- *
- * An orphaned completed slice branch is a `gsd/MID/SID` branch where the slice
- * is marked done in the roadmap (on that branch) but hasn't been squash-merged
- * to main yet. This happens when `complete-slice` succeeds and commits on the
- * slice branch, but the subsequent merge to main is interrupted (crash, timeout,
- * Ctrl+C, merge conflict that wasn't auto-resolved).
- *
- * Without this check, GSD gets stuck in an infinite loop: `deriveState()` on
- * main sees no slice artifacts → wants research-slice → idempotency key removed
- * (artifact not on main) → ensurePreconditions switches branch → merge guard
- * merges → re-derives → repeats.
- */
-async function mergeOrphanedSliceBranches(
-  base: string,
-  ctx: Pick<ExtensionContext, "ui">,
-): Promise<void> {
-  // List all local gsd/<MID>/<SID> branches (non-worktree pattern).
-  // Use execFileSync (not runGit/execSync) to avoid shell glob-expanding gsd/*/*
-  // and to avoid shell syntax errors from %(refname:short) on /bin/sh.
-  let branchListRaw = "";
-  try {
-    branchListRaw = execFileSync(
-      "git",
-      ["branch", "--list", "gsd/*/*", "--format=%(refname:short)"],
-      { cwd: base, stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8" },
-    ).trim();
-  } catch {
-    return; // no slice branches or git unavailable
-  }
-  if (!branchListRaw) return;
-
-  const branches = branchListRaw.split("\n").map(b => b.trim()).filter(Boolean);
-  for (const branch of branches) {
-    const parsed = parseSliceBranch(branch);
-    // Skip worktree-namespaced branches — those are managed by the worktree
-    // manager and should not be merged by the main-tree auto-mode.
-    if (!parsed || parsed.worktreeName) continue;
-
-    const { milestoneId, sliceId } = parsed;
-
-    // Ensure Git operations for this branch use the correct milestone context.
-    setActiveMilestoneId(base, milestoneId);
-
-    // Skip if already merged (no commits ahead of main)
-    const mainBranch = getMainBranch(base);
-    const aheadCount = nativeCommitCountBetween(base, mainBranch, branch);
-    if (aheadCount === 0) continue;
-
-    // Read the roadmap from the slice branch to check if the slice is done.
-    // relMilestoneFile resolves the actual directory name on disk (handles
-    // milestone directories with title suffixes like "M007 Payment System").
-    const roadmapRelPath = relMilestoneFile(base, milestoneId, "ROADMAP");
-    let roadmapContent: string | undefined;
-    try {
-      roadmapContent = execFileSync(
-        "git",
-        ["-C", base, "show", `${branch}:${roadmapRelPath}`],
-        { encoding: "utf8" },
-      );
-    } catch {
-      roadmapContent = undefined;
-    }
-    if (!roadmapContent) continue;
-
-    const roadmap = parseRoadmap(roadmapContent);
-    const sliceEntry = roadmap.slices.find(s => s.id === sliceId);
-    if (!sliceEntry?.done) continue;
-
-    // Orphaned completed branch detected — merge it to main now.
-    ctx.ui.notify(
-      `Orphaned completed slice branch detected: ${branch}. Merging to main before dispatch...`,
-      "info",
-    );
-    try {
-      let mergeResult;
-      if (isInAutoWorktree(base) && getMergeToMainMode() !== "slice") {
-        mergeResult = mergeSliceToMilestone(
-          base, milestoneId, sliceId, sliceEntry.title || sliceId,
-        );
-      } else {
-        switchToMain(base);
-        mergeResult = mergeSliceToMain(
-          base, milestoneId, sliceId, sliceEntry.title || sliceId,
-        );
-      }
-      ctx.ui.notify(
-        `Merged orphaned branch ${mergeResult.branch} → ${mainBranch}.`,
-        "info",
-      );
-    } catch (error) {
-      if (error instanceof MergeConflictError) {
-        // Abort and reset the incomplete merge so auto-mode can still start cleanly.
-        runGit(base, ["merge", "--abort"], { allowFailure: true });
-        runGit(base, ["reset", "--hard", "HEAD"], { allowFailure: true });
-        ctx.ui.notify(
-          `Orphaned branch ${branch} has merge conflicts — resolve manually and restart.\nConflicts in: ${error.conflictedFiles.join(", ")}`,
-          "error",
-        );
-        // Stop processing further branches after a conflict to avoid
-        // leaving the repo in a partially-merged state.
-        return;
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      ctx.ui.notify(
-        `Failed to merge orphaned branch ${branch}: ${message}`,
-        "warning",
-      );
-    }
   }
 }
 
@@ -625,7 +560,8 @@ export async function startAuto(
     if (currentMilestoneId) setActiveMilestoneId(base, currentMilestoneId);
 
     // ── Auto-worktree: re-enter worktree on resume if not already inside ──
-    if (currentMilestoneId && originalBasePath && !isInAutoWorktree(basePath) && shouldUseWorktreeIsolation(originalBasePath)) {
+    // Skip if already inside a worktree (manual /worktree) to prevent nesting.
+    if (currentMilestoneId && originalBasePath && !isInAutoWorktree(basePath) && !detectWorktreeName(basePath) && !detectWorktreeName(originalBasePath)) {
       try {
         const existingWtPath = getAutoWorktreePath(originalBasePath, currentMilestoneId);
         if (existingWtPath) {
@@ -673,7 +609,7 @@ export async function startAuto(
     return;
   }
 
-  // Ensure git repo exists — GSD needs it for branch-per-slice
+  // Ensure git repo exists — GSD needs it for worktree isolation
   try {
     execSync("git rev-parse --git-dir", { cwd: base, stdio: "pipe" });
   } catch {
@@ -762,6 +698,7 @@ export async function startAuto(
   basePath = base;
   unitDispatchCount.clear();
   unitRecoveryCount.clear();
+  lastBudgetAlertLevel = 0;
   unitLifetimeDispatches.clear();
   completedKeySet.clear();
   loadPersistedKeys(base, completedKeySet);
@@ -788,8 +725,22 @@ export async function startAuto(
 
   // ── Auto-worktree: create or enter worktree for the active milestone ──
   // Store the original project root before any chdir so we can restore on stop.
+  // Skip if already inside a worktree (manual /worktree or another auto-worktree)
+  // to prevent nested worktree creation.
   originalBasePath = base;
-  if (currentMilestoneId && shouldUseWorktreeIsolation(base)) {
+
+  const isUnderGsdWorktrees = (p: string): boolean => {
+    // Prevent creating nested auto-worktrees when running from within any
+    // `.gsd/worktrees/...` directory (including manual worktrees).
+    const marker = `${pathSep}.gsd${pathSep}worktrees${pathSep}`;
+    if (p.includes(marker)) {
+      return true;
+    }
+    const worktreesSuffix = `${pathSep}.gsd${pathSep}worktrees`;
+    return p.endsWith(worktreesSuffix);
+  };
+
+  if (currentMilestoneId && !detectWorktreeName(base) && !isUnderGsdWorktrees(base)) {
     try {
       const existingWtPath = getAutoWorktreePath(base, currentMilestoneId);
       if (existingWtPath) {
@@ -855,14 +806,45 @@ export async function startAuto(
     );
   }
 
-  // Merge any orphaned completed slice branches before dispatching.
-  // Orphaned branches arise when complete-slice commits on the slice branch
-  // but the merge to main is interrupted (crash, timeout, Ctrl+C).
-  // Without this check, GSD enters an infinite "Skipping ... Advancing" loop.
-  await mergeOrphanedSliceBranches(base, ctx);
-
   // Self-heal: clear stale runtime records where artifacts already exist
   await selfHealRuntimeRecords(base, ctx);
+
+  // Self-heal: remove stale .git/index.lock from prior crash.
+  // A stale lock file blocks all git operations (commit, merge, checkout).
+  // Only remove if older than 60 seconds (not from a concurrent process).
+  try {
+    const gitLockFile = join(base, ".git", "index.lock");
+    if (existsSync(gitLockFile)) {
+      const lockAge = Date.now() - statSync(gitLockFile).mtimeMs;
+      if (lockAge > 60_000) {
+        unlinkSync(gitLockFile);
+        ctx.ui.notify("Removed stale .git/index.lock from prior crash.", "info");
+      }
+    }
+  } catch { /* non-fatal */ }
+
+  // Pre-flight: validate milestone queue for multi-milestone runs.
+  // Warn about issues that will cause auto-mode to pause or block.
+  try {
+    const msDir = join(base, ".gsd", "milestones");
+    if (existsSync(msDir)) {
+      const milestoneIds = readdirSync(msDir, { withFileTypes: true })
+        .filter(d => d.isDirectory() && /^M\d{3}/.test(d.name))
+        .map(d => d.name.match(/^(M\d{3})/)?.[1] ?? d.name);
+      if (milestoneIds.length > 1) {
+        const issues: string[] = [];
+        for (const id of milestoneIds) {
+          const draft = resolveMilestoneFile(base, id, "CONTEXT-DRAFT");
+          if (draft) issues.push(`${id}: has CONTEXT-DRAFT.md (will pause for discussion)`);
+        }
+        if (issues.length > 0) {
+          ctx.ui.notify(`Pre-flight: ${milestoneIds.length} milestones queued.\n${issues.map(i => `  ⚠ ${i}`).join("\n")}`, "warning");
+        } else {
+          ctx.ui.notify(`Pre-flight: ${milestoneIds.length} milestones queued. All have full context.`, "info");
+        }
+      }
+    }
+  } catch { /* non-fatal — pre-flight should never block auto-mode */ }
 
   // Dispatch the first unit
   await dispatchNextUnit(ctx, pi);
@@ -1230,7 +1212,6 @@ function unitVerb(unitType: string): string {
     case "replan-slice": return "replanning";
     case "reassess-roadmap": return "reassessing";
     case "run-uat": return "running UAT";
-    case "fix-merge": return "resolving conflicts";
     default: return unitType;
   }
 }
@@ -1247,7 +1228,6 @@ function unitPhaseLabel(unitType: string): string {
     case "replan-slice": return "REPLAN";
     case "reassess-roadmap": return "REASSESS";
     case "run-uat": return "UAT";
-    case "fix-merge": return "MERGE-FIX";
     default: return unitType.toUpperCase();
   }
 }
@@ -1271,7 +1251,6 @@ function peekNext(unitType: string, state: GSDState): string {
     case "replan-slice": return `re-execute ${sid}`;
     case "reassess-roadmap": return "advance to next slice";
     case "run-uat": return "reassess roadmap";
-    case "fix-merge": return "continue merge";
     default: return "";
   }
 }
@@ -1543,15 +1522,41 @@ function getRoadmapSlicesSync(): { done: number; total: number; activeSliceTasks
 
 // ─── Core Loop ────────────────────────────────────────────────────────────────
 
+/** Tracks recursive skip depth to prevent TUI freeze on cascading completed-unit skips */
+let _skipDepth = 0;
+const MAX_SKIP_DEPTH = 20;
+
+/** Reentrancy guard for dispatchNextUnit itself (not just handleAgentEnd).
+ *  Prevents concurrent dispatch from watchdog timers, step wizard, and direct calls
+ *  that bypass the _handlingAgentEnd guard. Recursive calls (from skip paths) are
+ *  allowed via _skipDepth > 0. */
+let _dispatching = false;
+
 async function dispatchNextUnit(
   ctx: ExtensionContext,
   pi: ExtensionAPI,
 ): Promise<void> {
   if (!active || !cmdCtx) {
     if (active && !cmdCtx) {
-      ctx.ui.notify("Auto-mode dispatch failed: no command context. Run /gsd auto to restart.", "error");
+      ctx.ui.notify("Auto-mode session expired. Run /gsd auto to restart.", "info");
     }
     return;
+  }
+
+  // Reentrancy guard: allow recursive calls from skip paths (_skipDepth > 0)
+  // but block concurrent external calls (watchdog, step wizard, etc.)
+  if (_dispatching && _skipDepth === 0) {
+    return; // Another dispatch is in progress — bail silently
+  }
+  _dispatching = true;
+  try {
+  // Recursion depth guard: when many units are skipped in sequence (e.g., after
+  // crash recovery with 10+ completed units), recursive dispatchNextUnit calls
+  // can freeze the TUI or overflow the stack. Yield generously after MAX_SKIP_DEPTH.
+  if (_skipDepth > MAX_SKIP_DEPTH) {
+    _skipDepth = 0;
+    ctx.ui.notify(`Skipped ${MAX_SKIP_DEPTH}+ completed units. Yielding to UI before continuing.`, "info");
+    await new Promise(r => setTimeout(r, 200));
   }
 
   // Clear stale directory listing cache so deriveState sees fresh disk state (#431)
@@ -1570,6 +1575,7 @@ async function dispatchNextUnit(
       `Milestone ${currentMilestoneId} complete. Advancing to ${mid}: ${midTitle}.`,
       "info",
     );
+    sendDesktopNotification("GSD", `Milestone ${currentMilestoneId} complete!`, "success", "milestone");
     // Reset stuck detection for new milestone
     unitDispatchCount.clear();
     unitRecoveryCount.clear();
@@ -1589,6 +1595,7 @@ async function dispatchNextUnit(
       snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId);
       saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
     }
+    sendDesktopNotification("GSD", "All milestones complete!", "success", "milestone");
     await stopAuto(ctx, pi);
     return;
   }
@@ -1601,9 +1608,9 @@ async function dispatchNextUnit(
     return;
   }
 
-  // ── Mid-merge safety check: detect leftover state from a prior fix-merge session ──
-  // If MERGE_HEAD or SQUASH_MSG exists, a fix-merge session ran previously.
-  // Check whether it succeeded (no unmerged entries → finalize) or failed (still conflicted → reset + stop).
+  // ── Mid-merge safety check: detect leftover merge state from a prior session ──
+  // If MERGE_HEAD or SQUASH_MSG exists, check whether conflicts are resolved.
+  // If resolved: finalize the commit. If still conflicted: abort and reset.
   {
     const mergeHeadPath = join(basePath, ".git", "MERGE_HEAD");
     const squashMsgPath = join(basePath, ".git", "SQUASH_MSG");
@@ -1612,178 +1619,37 @@ async function dispatchNextUnit(
     if (hasMergeHead || hasSquashMsg) {
       const unmerged = runGit(basePath, ["diff", "--name-only", "--diff-filter=U"], { allowFailure: true });
       if (!unmerged || !unmerged.trim()) {
-        // fix-merge succeeded — finalize the commit if needed (squash or normal merge)
-        if (hasMergeHead || hasSquashMsg) {
-          try {
-            runGit(basePath, ["commit", "--no-edit"], { allowFailure: false });
-            const mode = hasMergeHead ? "merge" : "squash commit";
-            ctx.ui.notify(`Fix-merge session succeeded — finalized ${mode}.`, "info");
-          } catch {
-            // Commit may already exist; non-fatal
-          }
+        // All conflicts resolved — finalize the merge/squash commit
+        try {
+          runGit(basePath, ["commit", "--no-edit"], { allowFailure: false });
+          const mode = hasMergeHead ? "merge" : "squash commit";
+          ctx.ui.notify(`Finalized leftover ${mode} from prior session.`, "info");
+        } catch {
+          // Commit may already exist; non-fatal
         }
-        // Re-derive state from the now-merged working tree
-        invalidateStateCache();
-        clearParseCache();
-        clearPathCache();
-        state = await deriveState(basePath);
-        mid = state.activeMilestone?.id;
-        midTitle = state.activeMilestone?.title;
       } else {
-        // fix-merge failed — still has unresolved conflicts, abort merge/squash, reset and stop
+        // Still conflicted — abort and reset
         if (hasMergeHead) {
-          // Properly abort an in-progress merge so MERGE_HEAD and related metadata are cleared
           runGit(basePath, ["merge", "--abort"], { allowFailure: true });
         } else if (hasSquashMsg) {
-          // Squash-in-progress without MERGE_HEAD: remove stale squash metadata
-          try {
-            unlinkSync(squashMsgPath);
-          } catch {
-            // Best-effort cleanup; ignore failures
-          }
+          try { unlinkSync(squashMsgPath); } catch { /* best-effort */ }
         }
         runGit(basePath, ["reset", "--hard", "HEAD"], { allowFailure: true });
         ctx.ui.notify(
-          "Fix-merge session failed to resolve all conflicts. Working tree reset. Fix conflicts manually and restart.",
-          "error",
+          "Detected leftover merge state with unresolved conflicts — cleaned up. Re-deriving state.",
+          "warning",
         );
-        if (currentUnit) {
-          const modelId = ctx.model?.id ?? "unknown";
-          snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId);
-          saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
-        }
-        await stopAuto(ctx, pi);
-        return;
       }
+      invalidateStateCache();
+      clearParseCache();
+      clearPathCache();
+      state = await deriveState(basePath);
+      mid = state.activeMilestone?.id;
+      midTitle = state.activeMilestone?.title;
     }
   }
 
-  // ── General merge guard: merge completed slice branches before advancing ──
-  // If we're on a gsd/MID/SID branch and that slice is done (roadmap [x]),
-  // merge to main before dispatching the next unit. This handles:
-  //   - Normal complete-slice → merge → reassess flow
-  //   - LLM writes summary during task execution, skipping complete-slice
-  //   - Doctor post-hook marks everything done, skipping complete-slice
-  //   - complete-milestone runs on a slice branch (last slice bypass)
-  {
-    const currentBranch = getCurrentBranch(basePath);
-    const parsedBranch = parseSliceBranch(currentBranch);
-    if (parsedBranch) {
-      const branchMid = parsedBranch.milestoneId;
-      const branchSid = parsedBranch.sliceId;
-      // Check if this slice is marked done in the roadmap
-      const roadmapFile = resolveMilestoneFile(basePath, branchMid, "ROADMAP");
-      const roadmapContent = roadmapFile ? await loadFile(roadmapFile) : null;
-      if (roadmapContent) {
-        const roadmap = parseRoadmap(roadmapContent);
-        const sliceEntry = roadmap.slices.find(s => s.id === branchSid);
-        if (sliceEntry?.done) {
-          try {
-            const sliceTitleForMerge = sliceEntry.title || branchSid;
-            let mergeResult;
-            if (isInAutoWorktree(basePath) && getMergeToMainMode() !== "slice") {
-              mergeResult = mergeSliceToMilestone(
-                basePath, branchMid, branchSid, sliceTitleForMerge,
-              );
-            } else {
-              switchToMain(basePath);
-              mergeResult = mergeSliceToMain(
-                basePath, branchMid, branchSid, sliceTitleForMerge,
-              );
-            }
-            const targetBranch = getMainBranch(basePath);
-            ctx.ui.notify(
-              `Merged ${mergeResult.branch} → ${targetBranch}.`,
-              "info",
-            );
-            // Re-derive state from main so downstream logic sees merged state
-            invalidateStateCache();
-            clearParseCache();
-            clearPathCache();
-            state = await deriveState(basePath);
-            mid = state.activeMilestone?.id;
-            midTitle = state.activeMilestone?.title;
-          } catch (error) {
-            // MergeConflictError: dispatch a fix-merge session to resolve conflicts
-            if (error instanceof MergeConflictError) {
-              const fixMergeUnitId = `${parsedBranch.milestoneId}/${parsedBranch.sliceId}`;
-              const fixMergePrompt = buildFixMergePrompt(error);
-              ctx.ui.notify(
-                `Merge conflict in ${error.conflictedFiles.length} file(s) — dispatching fix-merge session.`,
-                "warning",
-              );
-
-              // Close out the previously active unit before overwriting currentUnit.
-              if (currentUnit) {
-                const modelId = ctx.model?.id ?? "unknown";
-                snapshotUnitMetrics(
-                  ctx,
-                  currentUnit.type,
-                  currentUnit.id,
-                  currentUnit.startedAt,
-                  modelId,
-                );
-                saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
-              }
-
-              // Dispatch fix-merge as the next unit (early-dispatch-and-return)
-              const fixMergeUnitType = "fix-merge";
-              currentUnit = { type: fixMergeUnitType, id: fixMergeUnitId, startedAt: Date.now() };
-              writeUnitRuntimeRecord(basePath, fixMergeUnitType, fixMergeUnitId, currentUnit.startedAt, {
-                phase: "dispatched",
-                wrapupWarningSent: false,
-                timeoutAt: null,
-                lastProgressAt: currentUnit.startedAt,
-                progressCount: 0,
-                lastProgressKind: "dispatch",
-              });
-              updateProgressWidget(ctx, fixMergeUnitType, fixMergeUnitId, state);
-              const result = await cmdCtx!.newSession();
-              if (result.cancelled) {
-                runGit(basePath, ["reset", "--hard", "HEAD"], { allowFailure: true });
-                await stopAuto(ctx, pi);
-                return;
-              }
-              const sessionFile = ctx.sessionManager.getSessionFile();
-              writeLock(basePath, fixMergeUnitType, fixMergeUnitId, completedUnits.length, sessionFile);
-              pi.sendMessage(
-                { customType: "gsd-auto", content: fixMergePrompt, display: verbose },
-                { triggerTurn: true },
-              );
-              return;
-            }
-
-            // Non-conflict errors: reset and stop
-            const message = formatGitError(error instanceof Error ? error : String(error));
-            try {
-              const status = runGit(basePath, ["status", "--porcelain"], { allowFailure: true });
-              if (status && (status.includes("UU ") || status.includes("AA ") || status.includes("UD "))) {
-                runGit(basePath, ["reset", "--hard", "HEAD"], { allowFailure: true });
-                ctx.ui.notify(
-                  `Cleaned up conflicted merge state after failed squash-merge.`,
-                  "warning",
-                );
-              }
-            } catch { /* best-effort cleanup */ }
-
-            ctx.ui.notify(
-              `Slice merge failed — stopping auto-mode. Fix conflicts manually and restart.\n${message}`,
-              "error",
-            );
-            if (currentUnit) {
-              const modelId = ctx.model?.id ?? "unknown";
-              snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId);
-              saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
-            }
-            await stopAuto(ctx, pi);
-            return;
-          }
-        }
-      }
-    }
-  }
-
-  // After merge, mid/midTitle may have been re-derived and could be undefined
+  // After merge guard removal (branchless architecture), mid/midTitle could be undefined
   if (!mid || !midTitle) {
     if (currentUnit) {
       const modelId = ctx.model?.id ?? "unknown";
@@ -1811,9 +1677,8 @@ async function dispatchNextUnit(
       if (existsSync(file)) writeFileSync(file, JSON.stringify([]), "utf-8");
       completedKeySet.clear();
     } catch { /* non-fatal */ }
-
     // ── Milestone merge: squash-merge milestone branch to main before stopping ──
-    if (currentMilestoneId && isInAutoWorktree(basePath) && originalBasePath && getMergeToMainMode() === "milestone") {
+    if (currentMilestoneId && isInAutoWorktree(basePath) && originalBasePath) {
       try {
         const roadmapPath = resolveMilestoneFile(originalBasePath, currentMilestoneId, "ROADMAP");
         const roadmapContent = readFileSync(roadmapPath, "utf-8");
@@ -1831,7 +1696,7 @@ async function dispatchNextUnit(
         );
       }
     }
-
+    sendDesktopNotification("GSD", `Milestone ${mid} complete!`, "success", "milestone");
     await stopAuto(ctx, pi);
     return;
   }
@@ -1843,7 +1708,9 @@ async function dispatchNextUnit(
       saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
     }
     await stopAuto(ctx, pi);
-    ctx.ui.notify(`Blocked: ${state.blockers.join(", ")}. Fix and run /gsd auto.`, "warning");
+    const blockerMsg = `Blocked: ${state.blockers.join(", ")}`;
+    ctx.ui.notify(`${blockerMsg}. Fix and run /gsd auto.`, "warning");
+    sendDesktopNotification("GSD", blockerMsg, "error", "attention");
     return;
   }
 
@@ -1851,16 +1718,58 @@ async function dispatchNextUnit(
   // Ensures the UAT file and slice summary are both on main when UAT runs.
   const prefs = loadEffectiveGSDPreferences()?.preferences;
 
-  // Budget ceiling guard — pause before starting next unit if ceiling is hit
+  // Budget ceiling guard — enforce budget with configurable action
   const budgetCeiling = prefs?.budget_ceiling;
-  if (budgetCeiling !== undefined) {
+  if (budgetCeiling !== undefined && budgetCeiling > 0) {
     const currentLedger = getLedger();
     const totalCost = currentLedger ? getProjectTotals(currentLedger.units).cost : 0;
-    if (totalCost >= budgetCeiling) {
-      ctx.ui.notify(
-        `Budget ceiling ${formatCost(budgetCeiling)} reached (spent ${formatCost(totalCost)}). Pausing auto-mode — /gsd auto to continue.`,
-        "warning",
-      );
+    const budgetPct = totalCost / budgetCeiling;
+    const budgetAlertLevel = getBudgetAlertLevel(budgetPct);
+    const newBudgetAlertLevel = getNewBudgetAlertLevel(lastBudgetAlertLevel, budgetPct);
+    const enforcement = prefs?.budget_enforcement ?? "pause";
+
+    const budgetEnforcementAction = getBudgetEnforcementAction(enforcement, budgetPct);
+
+    if (newBudgetAlertLevel === 100 && budgetEnforcementAction !== "none") {
+      const msg = `Budget ceiling ${formatCost(budgetCeiling)} reached (spent ${formatCost(totalCost)}).`;
+      lastBudgetAlertLevel = newBudgetAlertLevel;
+      if (budgetEnforcementAction === "halt") {
+        ctx.ui.notify(`${msg} Stopping auto-mode.`, "error");
+        sendDesktopNotification("GSD", msg, "error", "budget");
+        await stopAuto(ctx, pi);
+        return;
+      }
+      if (budgetEnforcementAction === "pause") {
+        ctx.ui.notify(`${msg} Pausing auto-mode — /gsd auto to override and continue.`, "warning");
+        sendDesktopNotification("GSD", msg, "warning", "budget");
+        await pauseAuto(ctx, pi);
+        return;
+      }
+      ctx.ui.notify(`${msg} Continuing (enforcement: warn).`, "warning");
+      sendDesktopNotification("GSD", msg, "warning", "budget");
+    } else if (newBudgetAlertLevel === 90) {
+      lastBudgetAlertLevel = newBudgetAlertLevel;
+      ctx.ui.notify(`Budget 90%: ${formatCost(totalCost)} / ${formatCost(budgetCeiling)}`, "warning");
+      sendDesktopNotification("GSD", `Budget 90%: ${formatCost(totalCost)} / ${formatCost(budgetCeiling)}`, "warning", "budget");
+    } else if (newBudgetAlertLevel === 75) {
+      lastBudgetAlertLevel = newBudgetAlertLevel;
+      ctx.ui.notify(`Budget 75%: ${formatCost(totalCost)} / ${formatCost(budgetCeiling)}`, "info");
+      sendDesktopNotification("GSD", `Budget 75%: ${formatCost(totalCost)} / ${formatCost(budgetCeiling)}`, "info", "budget");
+    } else if (budgetAlertLevel === 0) {
+      lastBudgetAlertLevel = 0;
+    }
+  } else {
+    lastBudgetAlertLevel = 0;
+  }
+
+  // Context window guard — pause if approaching context limits
+  const contextThreshold = prefs?.context_pause_threshold ?? 0; // 0 = disabled by default
+  if (contextThreshold > 0 && cmdCtx) {
+    const contextUsage = cmdCtx.getContextUsage();
+    if (contextUsage && contextUsage.percent >= contextThreshold) {
+      const msg = `Context window at ${contextUsage.percent}% (threshold: ${contextThreshold}%). Pausing to prevent truncated output.`;
+      ctx.ui.notify(`${msg} Run /gsd auto to continue (will start fresh session).`, "warning");
+      sendDesktopNotification("GSD", `Context ${contextUsage.percent}% — paused`, "warning", "attention");
       await pauseAuto(ctx, pi);
       return;
     }
@@ -1902,7 +1811,7 @@ async function dispatchNextUnit(
 
   // ── Phase-first dispatch: complete-slice MUST run before reassessment ──
   // If the current phase is "summarizing", complete-slice is responsible for
-  // mergeSliceToMain. Reassessment must wait until the merge is done.
+  // complete-slice must run before reassessment.
   if (state.phase === "summarizing") {
     const sid = state.activeSlice!.id;
     const sTitle = state.activeSlice!.title;
@@ -2028,7 +1937,7 @@ async function dispatchNextUnit(
         saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
       }
       await stopAuto(ctx, pi);
-      ctx.ui.notify(`Unexpected phase: ${state.phase}. Stopping auto-mode.`, "warning");
+      ctx.ui.notify(`Unhandled phase "${state.phase}" — run /gsd doctor to diagnose.`, "info");
       return;
     }
   }
@@ -2074,10 +1983,10 @@ async function dispatchNextUnit(
         `Skipping ${unitType} ${unitId} — already completed in a prior session. Advancing.`,
         "info",
       );
-      // Yield to the event loop before re-dispatching to avoid tight recursion
-      // when many units are already completed (e.g., after crash recovery).
-      await new Promise(r => setImmediate(r));
+      _skipDepth++;
+      await new Promise(r => setTimeout(r, 50));
       await dispatchNextUnit(ctx, pi);
+      _skipDepth = Math.max(0, _skipDepth - 1);
       return;
     } else {
       // Stale completion record — artifact missing. Remove and re-run.
@@ -2088,6 +1997,26 @@ async function dispatchNextUnit(
         "warning",
       );
     }
+  }
+
+  // Fallback: if the idempotency key is missing but the expected artifact already
+  // exists on disk, the task completed in a prior session without persisting the key.
+  // Persist it now and skip re-dispatch. This prevents infinite loops where a task
+  // completes successfully but the completion key was never written (e.g., completed
+  // on the first attempt before hitting the retry-threshold persistence logic).
+  if (verifyExpectedArtifact(unitType, unitId, basePath)) {
+    persistCompletedKey(basePath, idempotencyKey);
+    completedKeySet.add(idempotencyKey);
+    invalidateStateCache();
+    ctx.ui.notify(
+      `Skipping ${unitType} ${unitId} — artifact exists but completion key was missing. Repaired and advancing.`,
+      "info",
+    );
+    _skipDepth++;
+    await new Promise(r => setTimeout(r, 50));
+    await dispatchNextUnit(ctx, pi);
+    _skipDepth = Math.max(0, _skipDepth - 1);
+    return;
   }
 
   // Stuck detection — tracks total dispatches per unit (not just consecutive repeats).
@@ -2177,9 +2106,33 @@ async function dispatchNextUnit(
       return;
     }
 
+    // Last resort for complete-milestone: generate stub summary to unblock pipeline.
+    // All slices are done (otherwise we wouldn't be in completing-milestone phase),
+    // but the LLM failed to write the summary N times. A stub lets the pipeline advance.
+    if (unitType === "complete-milestone") {
+      try {
+        const mPath = resolveMilestonePath(basePath, unitId);
+        if (mPath) {
+          const stubPath = join(mPath, `${unitId}-SUMMARY.md`);
+          if (!existsSync(stubPath)) {
+            writeFileSync(stubPath, `# ${unitId} Summary\n\nAuto-generated stub — milestone tasks completed but summary generation failed after ${prevCount + 1} attempts.\nReview and replace this stub with a proper summary.\n`);
+            ctx.ui.notify(`Generated stub summary for ${unitId} to unblock pipeline. Review later.`, "warning");
+            persistCompletedKey(basePath, dispatchKey);
+            completedKeySet.add(dispatchKey);
+            unitDispatchCount.delete(dispatchKey);
+            invalidateStateCache();
+            await new Promise(r => setImmediate(r));
+            await dispatchNextUnit(ctx, pi);
+            return;
+          }
+        }
+      } catch { /* non-fatal — fall through to normal stop */ }
+    }
+
     const expected = diagnoseExpectedArtifact(unitType, unitId, basePath);
     const remediation = buildLoopRemediationSteps(unitType, unitId, basePath);
     await stopAuto(ctx, pi);
+    sendDesktopNotification("GSD", `Loop detected: ${unitType} ${unitId}`, "error", "error");
     ctx.ui.notify(
       `Loop detected: ${unitType} ${unitId} dispatched ${prevCount + 1} times total. Expected artifact not found.${expected ? `\n   Expected: ${expected}` : ""}${remediation ? `\n\n   Remediation steps:\n${remediation}` : "\n   Check branch state and .gsd/ artifacts."}`,
       "error",
@@ -2305,7 +2258,7 @@ async function dispatchNextUnit(
   const result = await cmdCtx!.newSession();
   if (result.cancelled) {
     await stopAuto(ctx, pi);
-    ctx.ui.notify("New session cancelled — auto-mode stopped.", "warning");
+    ctx.ui.notify("Auto-mode stopped.", "info");
     return;
   }
 
@@ -2411,7 +2364,7 @@ async function dispatchNextUnit(
         }
       }
       if (!model) {
-        ctx.ui.notify(`Model ${modelId} not found in available models, trying fallback.`, "warning");
+        if (verbose) ctx.ui.notify(`Model ${modelId} not found, trying fallback.`, "info");
         continue;
       }
 
@@ -2427,25 +2380,14 @@ async function dispatchNextUnit(
       } else {
         const nextModel = modelsToTry[modelsToTry.indexOf(modelId) + 1];
         if (nextModel) {
-          ctx.ui.notify(
-            `Failed to set model ${modelId}, trying fallback ${nextModel}...`,
-            "warning",
-          );
+          if (verbose) ctx.ui.notify(`Failed to set model ${modelId}, trying ${nextModel}...`, "info");
         } else {
-          ctx.ui.notify(
-            `Failed to set model ${modelId} and all fallbacks exhausted. Using default model.`,
-            "warning",
-          );
+          ctx.ui.notify(`All preferred models unavailable for ${unitType}. Using default.`, "warning");
         }
       }
     }
 
-    if (!modelSet) {
-      ctx.ui.notify(
-        `Could not set any preferred model for ${unitType}. Continuing with default.`,
-        "warning",
-      );
-    }
+    // modelSet=false is already handled by the "all fallbacks exhausted" warning above
   }
 
   // Start progress-aware supervision: a soft warning, an idle watchdog, and
@@ -2557,6 +2499,9 @@ async function dispatchNextUnit(
       "info",
     );
     await pauseAuto(ctx, pi);
+  }
+  } finally {
+    _dispatching = false;
   }
 }
 
@@ -3193,45 +3138,6 @@ async function buildReassessRoadmapPrompt(
   });
 }
 
-/**
- * Build a prompt for the fix-merge LLM session that resolves merge conflicts.
- */
-function buildFixMergePrompt(err: MergeConflictError): string {
-  const strategyLabel = err.strategy === "merge" ? "merge --no-ff" : "squash merge";
-  const fileList = err.conflictedFiles.map(f => `  - \`${f}\``).join("\n");
-
-  return [
-    `# Fix Merge Conflicts`,
-    ``,
-    `A ${strategyLabel} of branch \`${err.branch}\` into \`${err.mainBranch}\` produced conflicts in the following files:`,
-    ``,
-    fileList,
-    ``,
-    `## Instructions`,
-    ``,
-    `1. Read each conflicted file listed above`,
-    `2. Resolve all conflict markers (\`<<<<<<<\`, \`=======\`, \`>>>>>>>\`) by choosing the correct content`,
-    `3. Stage the resolved files with \`git add <file>\``,
-    `4. Commit the resolution:`,
-    err.strategy === "squash"
-      ? `   - This is a squash merge, so run: \`git commit --no-edit\` (the squash message is already prepared)`
-      : `   - This is a --no-ff merge, so run: \`git commit --no-edit\` (the merge message is already prepared)`,
-    ``,
-    `## Rules`,
-    ``,
-    `- Do NOT run \`git merge --abort\` or \`git reset\``,
-    `- Do NOT modify any files other than the conflicted ones listed above`,
-    `- Preserve the intent of both sides of the conflict — prefer the slice branch changes when the intent is unclear`,
-    ``,
-    `## Verification`,
-    ``,
-    `After committing, verify:`,
-    `1. \`git diff --name-only --diff-filter=U\` returns empty (no unmerged files)`,
-    `2. The conflicted files no longer contain any \`<<<<<<<\`, \`=======\`, or \`>>>>>>>\` markers`,
-    `3. \`git status\` shows a clean working tree`,
-  ].join("\n");
-}
-
 function extractSliceExecutionExcerpt(content: string | null, relPath: string): string {
   if (!content) {
     return [
@@ -3399,10 +3305,6 @@ function ensurePreconditions(
     }
   }
 
-  if (["research-slice", "plan-slice", "execute-task", "complete-slice", "replan-slice"].includes(unitType) && parts.length >= 2) {
-    const sid = parts[1]!;
-    ensureSliceBranch(base, mid, sid);
-  }
 }
 
 // ─── Diagnostics ──────────────────────────────────────────────────────────────
@@ -3809,8 +3711,6 @@ export function resolveExpectedArtifactPath(unitType: string, unitId: string, ba
       const dir = resolveMilestonePath(base, mid);
       return dir ? join(dir, buildMilestoneFileName(mid, "SUMMARY")) : null;
     }
-    case "fix-merge":
-      return null;
     default:
       return null;
   }
@@ -3833,14 +3733,6 @@ export function verifyExpectedArtifact(unitType: string, unitId: string, base: s
   // is managed by the hook engine, not the artifact verification system.
   if (unitType.startsWith("hook/")) return true;
 
-  // fix-merge has no file artifact — verify by checking git state
-  if (unitType === "fix-merge") {
-    const unmerged = runGit(base, ["diff", "--name-only", "--diff-filter=U"], { allowFailure: true });
-    if (unmerged && unmerged.trim()) return false;
-    if (existsSync(join(base, ".git", "MERGE_HEAD"))) return false;
-    if (existsSync(join(base, ".git", "SQUASH_MSG"))) return false;
-    return true;
-  }
 
   const absPath = resolveExpectedArtifactPath(unitType, unitId, base);
   // Unit types with no verifiable artifact always pass (e.g. replan-slice).
@@ -3948,8 +3840,6 @@ function diagnoseExpectedArtifact(unitType: string, unitId: string, base: string
       return `${relSliceFile(base, mid!, sid!, "UAT-RESULT")} (UAT result)`;
     case "complete-milestone":
       return `${relMilestoneFile(base, mid!, "SUMMARY")} (milestone summary)`;
-    case "fix-merge":
-      return "Clean working tree with no unmerged files, no MERGE_HEAD, no SQUASH_MSG (merge conflict resolution)";
     default:
       return null;
   }

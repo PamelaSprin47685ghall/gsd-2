@@ -14,8 +14,7 @@ import { execSync } from "node:child_process";
  * Patterns that are always correct regardless of project type.
  * No one ever wants these tracked.
  */
-const BASELINE_PATTERNS = [
-  // ── GSD runtime (not source artifacts) ──
+const GSD_RUNTIME_PATTERNS = [
   ".gsd/activity/",
   ".gsd/runtime/",
   ".gsd/worktrees/",
@@ -23,7 +22,15 @@ const BASELINE_PATTERNS = [
   ".gsd/metrics.json",
   ".gsd/completed-units.json",
   ".gsd/STATE.md",
+  ".gsd/gsd.db",
   ".gsd/DISCUSSION-MANIFEST.json",
+  ".gsd/milestones/**/*-CONTINUE.md",
+  ".gsd/milestones/**/continue.md",
+] as const;
+
+const BASELINE_PATTERNS = [
+  // ── GSD runtime (not source artifacts — planning files are tracked) ──
+  ...GSD_RUNTIME_PATTERNS,
 
   // ── OS junk ──
   ".DS_Store",
@@ -80,6 +87,28 @@ export function ensureGitignore(basePath: string): boolean {
     existing = readFileSync(gitignorePath, "utf-8");
   }
 
+  // Self-heal: remove blanket ".gsd/" lines from pre-v2.14.0 projects.
+  // The blanket ignore prevented planning artifacts (.gsd/milestones/) from
+  // being tracked in git, causing artifacts to vanish in worktrees and
+  // triggering loop detection failures. Replace with explicit runtime-only
+  // ignores so planning files are tracked naturally.
+  let modified = false;
+  const lines = existing.split("\n");
+  const filteredLines = lines.filter(line => {
+    const trimmed = line.trim();
+    // Remove standalone ".gsd/" lines (blanket ignore) but keep specific
+    // .gsd/ subpath patterns like ".gsd/activity/" or ".gsd/auto.lock"
+    if (trimmed === ".gsd/" || trimmed === ".gsd") {
+      modified = true;
+      return false;
+    }
+    return true;
+  });
+  if (modified) {
+    existing = filteredLines.join("\n");
+    writeFileSync(gitignorePath, existing, "utf-8");
+  }
+
   // Parse existing lines (trimmed, ignoring comments and blanks)
   const existingLines = new Set(
     existing
@@ -91,7 +120,7 @@ export function ensureGitignore(basePath: string): boolean {
   // Find patterns not yet present
   const missing = BASELINE_PATTERNS.filter((p) => !existingLines.has(p));
 
-  if (missing.length === 0) return false;
+  if (missing.length === 0) return modified;
 
   // Build the block to append
   const block = [
@@ -117,8 +146,7 @@ export function ensureGitignore(basePath: string): boolean {
  * Only removes from the index (`--cached`), never from disk. Idempotent.
  */
 export function untrackRuntimeFiles(basePath: string): void {
-  // The GSD runtime paths are the first 7 entries in BASELINE_PATTERNS
-  const runtimePaths = BASELINE_PATTERNS.slice(0, 7);
+  const runtimePaths = GSD_RUNTIME_PATTERNS;
 
   for (const pattern of runtimePaths) {
     // Use -r for directory patterns (trailing slash), strip the slash for the command
