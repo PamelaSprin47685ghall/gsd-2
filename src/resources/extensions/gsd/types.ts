@@ -238,6 +238,34 @@ export interface HookDispatchResult {
 
 export type BudgetEnforcementMode = 'warn' | 'pause' | 'halt';
 
+export type TokenProfile = 'budget' | 'balanced' | 'quality';
+
+export type InlineLevel = 'full' | 'standard' | 'minimal';
+
+export type ComplexityTier = 'light' | 'standard' | 'heavy';
+
+export interface ClassificationResult {
+  tier: ComplexityTier;
+  reason: string;
+  downgraded: boolean;
+}
+
+export interface TaskMetadata {
+  fileCount?: number;
+  dependencyCount?: number;
+  isNewFile?: boolean;
+  tags?: string[];
+  estimatedLines?: number;
+  codeBlockCount?: number;
+  complexityKeywords?: string[];
+}
+
+export interface PhaseSkipPreferences {
+  skip_research?: boolean;
+  skip_reassess?: boolean;
+  skip_slice_research?: boolean;
+}
+
 export interface NotificationPreferences {
   enabled?: boolean;           // default true
   on_complete?: boolean;       // notify on each unit completion
@@ -305,4 +333,33 @@ export interface HookStatusEntry {
   targets: string[];
   /** Current cycle counts for active triggers. */
   activeCycles: Record<string, number>;
+}
+
+// ─── Database Types (Decisions & Requirements) ────────────────────────────
+
+export interface Decision {
+  seq: number;              // auto-increment primary key
+  id: string;               // e.g. "D001"
+  when_context: string;     // when/context of the decision
+  scope: string;            // scope (milestone, slice, global, etc.)
+  decision: string;         // what was decided
+  choice: string;           // the specific choice made
+  rationale: string;        // why this choice
+  revisable: string;        // whether/when revisable
+  superseded_by: string | null;  // ID of superseding decision, or null
+}
+
+export interface Requirement {
+  id: string;               // e.g. "R001"
+  class: string;            // requirement class (functional, non-functional, etc.)
+  status: string;           // active, validated, deferred, etc.
+  description: string;      // short description
+  why: string;              // rationale
+  source: string;           // origin (milestone, user, etc.)
+  primary_owner: string;    // owning slice/milestone
+  supporting_slices: string; // other slices that touch this
+  validation: string;       // how to validate
+  notes: string;            // additional notes
+  full_content: string;     // full requirement text
+  superseded_by: string | null;  // ID of superseding requirement, or null
 }

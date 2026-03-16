@@ -65,6 +65,7 @@ Titles live inside file content (headings, frontmatter), not in file or director
   PROJECT.md            (living doc - what the project is right now)
   REQUIREMENTS.md       (requirement contract - tracks active/validated/deferred/out-of-scope)
   DECISIONS.md          (append-only register of architectural and pattern decisions)
+  KNOWLEDGE.md          (append-only register of project-specific rules, patterns, and lessons learned)
   OVERRIDES.md          (user-issued overrides that supersede plan content via /gsd steer)
   QUEUE.md              (append-only log of queued milestones via /gsd queue)
   STATE.md
@@ -100,6 +101,7 @@ All auto-mode work happens inside a worktree at `.gsd/worktrees/<MID>/`. This is
 - **PROJECT.md** is a living document describing what the project is right now - current state only, updated at slice completion when stale
 - **REQUIREMENTS.md** tracks the requirement contract — requirements move between Active, Validated, Deferred, Blocked, and Out of Scope as slices prove or invalidate them. Update at slice completion when evidence supports a status change.
 - **DECISIONS.md** is an append-only register of architectural and pattern decisions - read it during planning/research, append to it during execution when a meaningful decision is made
+- **KNOWLEDGE.md** is an append-only register of project-specific rules, patterns, and lessons learned. Read it at the start of every unit. Append to it when you discover a recurring issue, a non-obvious pattern, or a rule that future agents should follow.
 - **CONTEXT.md** files (milestone or slice level) capture the brief — scope, goals, constraints, and key decisions from discussion. When present, they are the authoritative source for what a milestone or slice is trying to achieve. Read them before planning or executing.
 - **Milestones** are major project phases (M001, M002, ...)
 - **Slices** are demoable vertical increments (S01, S02, ...) ordered by risk. After each slice completes, the roadmap is reassessed before the next slice begins.
@@ -126,6 +128,7 @@ Templates showing the expected format for each artifact type are in:
 - `/gsd stop` - stop auto-mode
 - `/gsd status` - progress dashboard overlay
 - `/gsd queue` - queue future milestones (safe while auto-mode is running)
+- `/gsd quick <task>` - quick task with GSD guarantees (atomic commits, state tracking) but no milestone ceremony
 - `Ctrl+Alt+G` - toggle dashboard overlay
 - `Ctrl+Alt+B` - show shell processes
 
@@ -137,7 +140,7 @@ Templates showing the expected format for each artifact type are in:
 
 **File editing:** Always `read` a file before using `edit`. The `edit` tool requires exact text match — you need the real content, not a guess. Use `write` only for new files or complete rewrites.
 
-**Code navigation:** Use `lsp` for go-to-definition, find-references, and type info. Falls back gracefully if no server is available. Never `grep` for a symbol definition when `lsp` can resolve it semantically.
+**Code navigation:** Use `lsp` for definition, type_definition, implementation, references, incoming_calls, outgoing_calls, hover, signature, symbols, rename, code_actions, format, and diagnostics. Falls back gracefully if no server is available. Never `grep` for a symbol definition when `lsp` can resolve it semantically. Never shell out to prettier/rustfmt/gofmt when `lsp format` is available. After editing code, use `lsp diagnostics` to verify no type errors were introduced.
 
 **Codebase exploration:** Use `subagent` with `scout` for broad unfamiliar subsystem mapping. Use `rg` for text search across files. Use `lsp` for structural navigation. Never read files one-by-one to "explore" — search first, then read what's relevant.
 

@@ -7,6 +7,7 @@
 [![npm version](https://img.shields.io/npm/v/gsd-pi?style=for-the-badge&logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/gsd-pi)
 [![npm downloads](https://img.shields.io/npm/dm/gsd-pi?style=for-the-badge&logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/gsd-pi)
 [![GitHub stars](https://img.shields.io/github/stars/gsd-build/GSD-2?style=for-the-badge&logo=github&color=181717)](https://github.com/gsd-build/GSD-2)
+[![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/gsd)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 
 The original GSD went viral as a prompt framework for Claude Code. It worked, but it was fighting the tool — injecting prompts through slash commands, hoping the LLM would follow instructions, with no actual control over context windows, sessions, or execution.
@@ -18,6 +19,25 @@ One command. Walk away. Come back to a built project with clean git history.
 <pre><code>npm install -g gsd-pi</code></pre>
 
 </div>
+
+---
+
+## Documentation
+
+Full documentation is available in the [`docs/`](./docs/) directory:
+
+- **[Getting Started](./docs/getting-started.md)** — install, first run, basic usage
+- **[Auto Mode](./docs/auto-mode.md)** — autonomous execution deep-dive
+- **[Configuration](./docs/configuration.md)** — all preferences, models, git, and hooks
+- **[Token Optimization](./docs/token-optimization.md)** — profiles, context compression, complexity routing (v2.17)
+- **[Cost Management](./docs/cost-management.md)** — budgets, tracking, projections
+- **[Git Strategy](./docs/git-strategy.md)** — worktree isolation, branching, merge behavior
+- **[Working in Teams](./docs/working-in-teams.md)** — unique IDs, shared artifacts
+- **[Skills](./docs/skills.md)** — bundled skills, discovery, custom authoring
+- **[Commands Reference](./docs/commands.md)** — all commands and keyboard shortcuts
+- **[Architecture](./docs/architecture.md)** — system design and dispatch pipeline
+- **[Troubleshooting](./docs/troubleshooting.md)** — common issues, doctor, recovery
+- **[Migration from v1](./docs/migration.md)** — `.planning` → `.gsd` migration
 
 ---
 
@@ -213,6 +233,7 @@ On first run, GSD launches a branded setup wizard that walks you through LLM pro
 | `/gsd next`             | Explicit step mode (same as bare `/gsd`)                        |
 | `/gsd auto`             | Autonomous mode — researches, plans, executes, commits, repeats |
 | `/gsd stop`             | Stop auto mode gracefully                                       |
+| `/gsd steer`            | Hard-steer plan documents during execution                      |
 | `/gsd discuss`          | Discuss architecture and decisions (works alongside auto mode)  |
 | `/gsd status`           | Progress dashboard                                              |
 | `/gsd queue`            | Queue future milestones (safe during auto mode)                 |
@@ -332,6 +353,26 @@ unique_milestone_ids: true
 | `always_use_skills`    | Skills to always load when relevant                                                                   |
 | `skill_rules`          | Situational rules for skill routing                                                                   |
 | `unique_milestone_ids` | Uses unique milestone names to avoid clashes when working in teams of people                          |
+
+### Token Optimization (v2.17)
+
+GSD 2.17 introduced a coordinated token optimization system that reduces usage by 40-60% on cost-sensitive workloads. Set a single preference to coordinate model selection, phase skipping, and context compression:
+
+```yaml
+token_profile: budget      # or balanced (default), quality
+```
+
+| Profile | Savings | What It Does |
+|---------|---------|-------------|
+| `budget` | 40-60% | Cheap models, skip research/reassess, minimal context inlining |
+| `balanced` | 10-20% | Default models, skip slice research, standard context |
+| `quality` | 0% | All phases, all context, full model power |
+
+**Complexity-based routing** automatically classifies tasks as simple/standard/complex and routes to appropriate models. Simple docs tasks get Haiku; complex architectural work gets Opus. The classification is heuristic (sub-millisecond, no LLM calls) and learns from outcomes via a persistent routing history.
+
+**Budget pressure** graduates model downgrading as you approach your budget ceiling — 50%, 75%, and 90% thresholds progressively shift work to cheaper tiers.
+
+See the full [Token Optimization Guide](./docs/token-optimization.md) for details.
 
 ### Bundled Tools
 

@@ -1,5 +1,4 @@
 // GSD Git Preferences Tests — validates git.isolation and git.merge_to_main handling
-// Copyright (c) 2026 Jeremy McSpadden <jeremy@fluxlabs.net>
 
 import { createTestContext } from "./test-helpers.ts";
 import { validatePreferences } from "../preferences.ts";
@@ -66,6 +65,34 @@ async function main(): Promise<void> {
     assertEq(errors.length, 0, "branch isolation + deprecated merge_to_main — no errors");
     assertEq(warnings.length, 1, "branch isolation + deprecated merge_to_main — 1 warning (merge_to_main only)");
     assertTrue(warnings[0].includes("merge_to_main"), "warning mentions merge_to_main");
+  }
+
+  console.log("\n=== git.commit_docs ===");
+
+  // Valid boolean values accepted
+  {
+    const { preferences, errors } = validatePreferences({ git: { commit_docs: false } });
+    assertEq(errors.length, 0, "commit_docs: false — no errors");
+    assertEq(preferences.git?.commit_docs, false, "commit_docs: false — value preserved");
+  }
+  {
+    const { preferences, errors } = validatePreferences({ git: { commit_docs: true } });
+    assertEq(errors.length, 0, "commit_docs: true — no errors");
+    assertEq(preferences.git?.commit_docs, true, "commit_docs: true — value preserved");
+  }
+
+  // Invalid type produces error
+  {
+    const { errors } = validatePreferences({ git: { commit_docs: "no" as any } });
+    assertTrue(errors.length > 0, "commit_docs: string — produces error");
+    assertTrue(errors[0].includes("commit_docs"), "commit_docs: string — error mentions commit_docs");
+  }
+
+  // Undefined passes through without issue
+  {
+    const { preferences, errors } = validatePreferences({ git: { auto_push: true } });
+    assertEq(errors.length, 0, "commit_docs: undefined — no errors");
+    assertEq(preferences.git?.commit_docs, undefined, "commit_docs: undefined — not set");
   }
 
   report();
