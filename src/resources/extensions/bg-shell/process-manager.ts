@@ -39,6 +39,8 @@ export function setPendingAlerts(alerts: string[]): void {
 
 export function addOutputLine(bg: BgProcess, stream: "stdout" | "stderr", line: string): void {
 	bg.output.push({ stream, line, ts: Date.now() });
+	if (stream === "stdout") bg.stdoutLineCount++;
+	else bg.stderrLineCount++;
 	if (bg.output.length > MAX_BUFFER_LINES) {
 		const excess = bg.output.length - MAX_BUFFER_LINES;
 		bg.output.splice(0, excess);
@@ -60,8 +62,6 @@ export function pushAlert(bg: BgProcess, message: string): void {
 }
 
 export function getInfo(p: BgProcess): BgProcessInfo {
-	const stdoutLines = p.output.filter(l => l.stream === "stdout").length;
-	const stderrLines = p.output.filter(l => l.stream === "stderr").length;
 	return {
 		id: p.id,
 		label: p.label,
@@ -72,8 +72,8 @@ export function getInfo(p: BgProcess): BgProcessInfo {
 		exitCode: p.exitCode,
 		signal: p.signal,
 		outputLines: p.output.length,
-		stdoutLines,
-		stderrLines,
+		stdoutLines: p.stdoutLineCount,
+		stderrLines: p.stderrLineCount,
 		status: p.status,
 		processType: p.processType,
 		ports: p.ports,
@@ -161,6 +161,8 @@ export function startProcess(opts: StartOptions): BgProcess {
 		commandHistory: [],
 		lineDedup: new Map(),
 		totalRawLines: 0,
+		stdoutLineCount: 0,
+		stderrLineCount: 0,
 		envKeys: Object.keys(opts.env || {}),
 		restartCount: 0,
 		startConfig: {
