@@ -2453,18 +2453,31 @@ async function dispatchNextUnit(
           `Skip loop detected: ${unitType} ${unitId} skipped ${skipCount} times without advancing. Evicting completion record and forcing reconciliation.`,
           "warning",
         );
+        if (!active) return;
         _skipDepth++;
-        await new Promise(r => setTimeout(r, 50));
+        await new Promise(r => setTimeout(r, 150));
         await dispatchNextUnit(ctx, pi);
         _skipDepth = Math.max(0, _skipDepth - 1);
+        return;
+      }
+      // Count toward lifetime cap so hard-stop fires during skip loops (#792)
+      const lifeSkip = (unitLifetimeDispatches.get(idempotencyKey) ?? 0) + 1;
+      unitLifetimeDispatches.set(idempotencyKey, lifeSkip);
+      if (lifeSkip > MAX_LIFETIME_DISPATCHES) {
+        await stopAuto(ctx, pi, `Hard loop: ${unitType} ${unitId} (skip cycle)`);
+        ctx.ui.notify(
+          `Hard loop detected: ${unitType} ${unitId} hit lifetime cap during skip cycle (${lifeSkip} iterations).`,
+          "error",
+        );
         return;
       }
       ctx.ui.notify(
         `Skipping ${unitType} ${unitId} — already completed in a prior session. Advancing.`,
         "info",
       );
+      if (!active) return;
       _skipDepth++;
-      await new Promise(r => setTimeout(r, 50));
+      await new Promise(r => setTimeout(r, 150));
       await dispatchNextUnit(ctx, pi);
       _skipDepth = Math.max(0, _skipDepth - 1);
       return;
@@ -2500,18 +2513,31 @@ async function dispatchNextUnit(
         `Skip loop detected: ${unitType} ${unitId} skipped ${skipCount2} times without advancing. Evicting completion record and forcing reconciliation.`,
         "warning",
       );
+      if (!active) return;
       _skipDepth++;
-      await new Promise(r => setTimeout(r, 50));
+      await new Promise(r => setTimeout(r, 150));
       await dispatchNextUnit(ctx, pi);
       _skipDepth = Math.max(0, _skipDepth - 1);
+      return;
+    }
+    // Count toward lifetime cap so hard-stop fires during skip loops (#792)
+    const lifeSkip2 = (unitLifetimeDispatches.get(idempotencyKey) ?? 0) + 1;
+    unitLifetimeDispatches.set(idempotencyKey, lifeSkip2);
+    if (lifeSkip2 > MAX_LIFETIME_DISPATCHES) {
+      await stopAuto(ctx, pi, `Hard loop: ${unitType} ${unitId} (skip cycle)`);
+      ctx.ui.notify(
+        `Hard loop detected: ${unitType} ${unitId} hit lifetime cap during skip cycle (${lifeSkip2} iterations).`,
+        "error",
+      );
       return;
     }
     ctx.ui.notify(
       `Skipping ${unitType} ${unitId} — artifact exists but completion key was missing. Repaired and advancing.`,
       "info",
     );
+    if (!active) return;
     _skipDepth++;
-    await new Promise(r => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, 150));
     await dispatchNextUnit(ctx, pi);
     _skipDepth = Math.max(0, _skipDepth - 1);
     return;
