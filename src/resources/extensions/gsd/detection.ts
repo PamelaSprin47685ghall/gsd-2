@@ -48,6 +48,9 @@ export interface V2Detection {
   hasContext: boolean;
 }
 
+/** Apple platform SDKROOTs found in Xcode project.pbxproj files. */
+export type XcodePlatform = "iphoneos" | "macosx" | "watchos" | "appletvos" | "xros";
+
 export interface ProjectSignals {
   /** Detected project/package files */
   detectedFiles: string[];
@@ -57,6 +60,8 @@ export interface ProjectSignals {
   isMonorepo: boolean;
   /** Primary language hint */
   primaryLanguage?: string;
+  /** Apple platform SDKROOTs detected from *.xcodeproj/project.pbxproj */
+  xcodePlatforms: XcodePlatform[];
   /** Has existing CI configuration? */
   hasCI: boolean;
   /** Has existing test setup? */
@@ -264,6 +269,9 @@ export function detectProjectSignals(basePath: string): ProjectSignals {
   // Git repo detection
   const isGitRepo = existsSync(join(basePath, ".git"));
 
+  // Xcode platform detection — parse SDKROOT from project.pbxproj
+  const xcodePlatforms = detectXcodePlatforms(basePath);
+
   // Monorepo detection
   let isMonorepo = false;
   for (const marker of MONOREPO_MARKERS) {
@@ -306,11 +314,61 @@ export function detectProjectSignals(basePath: string): ProjectSignals {
     isGitRepo,
     isMonorepo,
     primaryLanguage,
+    xcodePlatforms,
     hasCI,
     hasTests,
     packageManager,
     verificationCommands,
   };
+}
+
+// ─── Xcode Platform Detection ───────────────────────────────────────────────────
+
+/** Known SDKROOT values → canonical platform names. */
+const SDKROOT_MAP: Record<string, XcodePlatform> = {
+  iphoneos: "iphoneos",
+  iphonesimulator: "iphoneos",      // simulator builds still target iOS
+  macosx: "macosx",
+  watchos: "watchos",
+  watchsimulator: "watchos",
+  appletvos: "appletvos",
+  appletvsimulator: "appletvos",
+  xros: "xros",
+  xrsimulator: "xros",
+};
+
+/**
+ * Scan *.xcodeproj directories for project.pbxproj and extract SDKROOT values.
+ * Returns deduplicated, canonical platform list (e.g. ["iphoneos"]).
+ *
+ * Reading the pbxproj is a lightweight regex scan — no full plist parsing needed.
+ * We read at most 256 KB per file to keep detection fast.
+ */
+function detectXcodePlatforms(basePath: string): XcodePlatform[] {
+  const platforms = new Set<XcodePlatform>();
+  try {
+    const entries = readdirSync(basePath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.endsWith(".xcodeproj")) continue;
+      const pbxprojPath = join(basePath, entry.name, "project.pbxproj");
+      try {
+        // Read a bounded slice — pbxproj files can be large in huge projects
+        const content = readFileSync(pbxprojPath, { encoding: "utf-8", flag: "r" }).slice(0, 256 * 1024);
+        // Match SDKROOT = <value>; — both quoted and unquoted forms
+        const re = /SDKROOT\s*=\s*"?([a-z]+)"?\s*;/gi;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(content)) !== null) {
+          const canonical = SDKROOT_MAP[m[1].toLowerCase()];
+          if (canonical) platforms.add(canonical);
+        }
+      } catch {
+        // unreadable pbxproj — skip
+      }
+    }
+  } catch {
+    // unreadable directory
+  }
+  return [...platforms];
 }
 
 // ─── Package Manager Detection ──────────────────────────────────────────────────

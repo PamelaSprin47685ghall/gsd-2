@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
 import { showNextAction } from "../shared/tui.js";
-import type { ProjectSignals } from "./detection.js";
+import type { ProjectSignals, XcodePlatform } from "./detection.js";
 
 // ─── Catalog Types ────────────────────────────────────────────────────────────
 
@@ -35,19 +35,136 @@ export interface SkillPack {
   matchLanguages?: string[];
   /** Which detected project files trigger this pack */
   matchFiles?: string[];
+  /** Trigger when Xcode project targets one of these platforms */
+  matchXcodePlatforms?: XcodePlatform[];
 }
 
 // ─── Curated Catalog ──────────────────────────────────────────────────────────
 
 export const SKILL_CATALOG: SkillPack[] = [
-  // ── iOS / Swift ───────────────────────────────────────────────────────────
+  // ── Swift (language-level — any Swift project) ────────────────────────────
   {
-    label: "Swift / iOS",
-    description: "SwiftUI, Swift concurrency, SwiftData, iOS frameworks",
+    label: "SwiftUI",
+    description: "SwiftUI layout, navigation, animations, gestures, Liquid Glass",
     repo: "dpearson2699/swift-ios-skills",
-    skills: ["*"],
+    skills: [
+      "swiftui-animation",
+      "swiftui-gestures",
+      "swiftui-layout-components",
+      "swiftui-liquid-glass",
+      "swiftui-navigation",
+      "swiftui-patterns",
+      "swiftui-performance",
+      "swiftui-uikit-interop",
+    ],
     matchLanguages: ["swift"],
     matchFiles: ["Package.swift"],
+  },
+  {
+    label: "Swift Core",
+    description: "Swift language, concurrency, Codable, Charts, Testing, SwiftData",
+    repo: "dpearson2699/swift-ios-skills",
+    skills: [
+      "swift-codable",
+      "swift-charts",
+      "swift-concurrency",
+      "swift-language",
+      "swift-testing",
+      "swiftdata",
+    ],
+    matchLanguages: ["swift"],
+    matchFiles: ["Package.swift"],
+  },
+  // ── iOS (Xcode project targeting iphoneos required) ───────────────────────
+  {
+    label: "iOS App Frameworks",
+    description: "App Intents, Widgets, StoreKit, MapKit, Live Activities, push notifications",
+    repo: "dpearson2699/swift-ios-skills",
+    skills: [
+      "alarmkit",
+      "app-clips",
+      "app-intents",
+      "live-activities",
+      "mapkit-location",
+      "photos-camera-media",
+      "push-notifications",
+      "storekit",
+      "tipkit",
+      "widgetkit",
+    ],
+    matchXcodePlatforms: ["iphoneos"],
+  },
+  {
+    label: "iOS Data Frameworks",
+    description: "CloudKit, HealthKit, MusicKit, WeatherKit, Contacts, Calendar",
+    repo: "dpearson2699/swift-ios-skills",
+    skills: [
+      "cloudkit-sync",
+      "contacts-framework",
+      "eventkit-calendar",
+      "healthkit",
+      "musickit-audio",
+      "passkit-wallet",
+      "weatherkit",
+    ],
+    matchXcodePlatforms: ["iphoneos"],
+  },
+  {
+    label: "iOS AI & ML",
+    description: "Core ML, Vision, on-device AI, speech recognition, NLP",
+    repo: "dpearson2699/swift-ios-skills",
+    skills: [
+      "apple-on-device-ai",
+      "coreml",
+      "natural-language",
+      "speech-recognition",
+      "vision-framework",
+    ],
+    matchXcodePlatforms: ["iphoneos"],
+  },
+  {
+    label: "iOS Engineering",
+    description: "Networking, security, accessibility, localization, Instruments, App Store review",
+    repo: "dpearson2699/swift-ios-skills",
+    skills: [
+      "app-store-review",
+      "authentication",
+      "background-processing",
+      "debugging-instruments",
+      "device-integrity",
+      "ios-accessibility",
+      "ios-localization",
+      "ios-networking",
+      "ios-security",
+      "metrickit-diagnostics",
+    ],
+    matchXcodePlatforms: ["iphoneos"],
+  },
+  {
+    label: "iOS Hardware",
+    description: "Bluetooth, CoreMotion, NFC, PencilKit, RealityKit AR",
+    repo: "dpearson2699/swift-ios-skills",
+    skills: [
+      "core-bluetooth",
+      "core-motion",
+      "core-nfc",
+      "pencilkit-drawing",
+      "realitykit-ar",
+    ],
+    matchXcodePlatforms: ["iphoneos"],
+  },
+  {
+    label: "iOS Platform",
+    description: "CallKit, EnergyKit, HomeKit, SharePlay, PermissionKit",
+    repo: "dpearson2699/swift-ios-skills",
+    skills: [
+      "callkit-voip",
+      "energykit",
+      "homekit-matter",
+      "permissionkit",
+      "shareplay-activities",
+    ],
+    matchXcodePlatforms: ["iphoneos"],
   },
   // ── React / Next.js ───────────────────────────────────────────────────────
   {
@@ -127,9 +244,24 @@ export const GREENFIELD_STACKS: Array<{
 }> = [
   {
     id: "ios",
-    label: "iOS / Swift",
-    description: "SwiftUI, Swift, iOS frameworks",
-    packs: ["Swift / iOS"],
+    label: "iOS App",
+    description: "Full iOS development — SwiftUI, Swift, and all iOS frameworks",
+    packs: [
+      "SwiftUI",
+      "Swift Core",
+      "iOS App Frameworks",
+      "iOS Data Frameworks",
+      "iOS AI & ML",
+      "iOS Engineering",
+      "iOS Hardware",
+      "iOS Platform",
+    ],
+  },
+  {
+    id: "swift",
+    label: "Swift (non-iOS)",
+    description: "Swift packages, server-side Swift, CLI tools, SwiftUI without iOS",
+    packs: ["SwiftUI", "Swift Core"],
   },
   {
     id: "react-web",
@@ -202,6 +334,12 @@ export function matchPacksForProject(signals: ProjectSignals): SkillPack[] {
         }
       }
     }
+
+    // Xcode platform match (e.g. iOS packs only when SDKROOT = iphoneos)
+    if (pack.matchXcodePlatforms && signals.xcodePlatforms.length > 0) {
+      const hasMatch = pack.matchXcodePlatforms.some((p) => signals.xcodePlatforms.includes(p));
+      if (hasMatch) matched.add(pack);
+    }
   }
 
   return [...matched];
@@ -219,14 +357,10 @@ export function installSkillPack(pack: SkillPack): Promise<boolean> {
   return new Promise((resolve) => {
     const args = ["--yes", "skills", "add", pack.repo];
 
-    if (pack.skills.length === 1 && pack.skills[0] === "*") {
-      args.push("--all");
-    } else {
-      for (const skill of pack.skills) {
-        args.push("--skill", skill);
-      }
-      args.push("-y");
+    for (const skill of pack.skills) {
+      args.push("--skill", skill);
     }
+    args.push("-y");
 
     execFile("npx", args, { timeout: 120_000 }, (error) => {
       resolve(!error);
@@ -235,17 +369,46 @@ export function installSkillPack(pack: SkillPack): Promise<boolean> {
 }
 
 /**
+ * Install multiple packs, batching by repo to minimize npx invocations.
+ * Returns the labels of successfully installed packs.
+ */
+export async function installPacksBatched(
+  packs: SkillPack[],
+  onProgress?: (label: string) => void,
+): Promise<string[]> {
+  // Group packs by repo
+  const byRepo = new Map<string, { skills: string[]; labels: string[] }>();
+  for (const pack of packs) {
+    const entry = byRepo.get(pack.repo) ?? { skills: [], labels: [] };
+    entry.skills.push(...pack.skills);
+    entry.labels.push(pack.label);
+    byRepo.set(pack.repo, entry);
+  }
+
+  const installed: string[] = [];
+  for (const [repo, { skills, labels }] of byRepo) {
+    onProgress?.(labels.join(", "));
+    const ok = await new Promise<boolean>((resolve) => {
+      const args = ["--yes", "skills", "add", repo];
+      for (const skill of skills) {
+        args.push("--skill", skill);
+      }
+      args.push("-y");
+      execFile("npx", args, { timeout: 120_000 }, (error) => {
+        resolve(!error);
+      });
+    });
+    if (ok) installed.push(...labels);
+  }
+  return installed;
+}
+
+/**
  * Check if any skills from a pack are already installed.
  */
 export function isPackInstalled(pack: SkillPack): boolean {
   const skillsDir = join(homedir(), ".agents", "skills");
   if (!existsSync(skillsDir)) return false;
-
-  if (pack.skills.length === 1 && pack.skills[0] === "*") {
-    // For wildcard packs, check if the repo name appears as a skill dir prefix
-    // This is a heuristic — can't know all skill names without querying the repo
-    return false;
-  }
 
   return pack.skills.every((name) =>
     existsSync(join(skillsDir, name, "SKILL.md")),
@@ -281,20 +444,41 @@ export async function runSkillInstallStep(
     const toInstall = matched.filter((p) => !isPackInstalled(p));
     if (toInstall.length === 0) return installed;
 
-    const packNames = toInstall.map((p) => `${p.label}: ${p.description}`);
+    // Group for display: Swift packs vs iOS packs vs other
+    const swiftPacks = toInstall.filter((p) => p.matchLanguages?.includes("swift"));
+    const iosPacks = toInstall.filter((p) => p.matchXcodePlatforms?.includes("iphoneos"));
+    const otherPacks = toInstall.filter((p) => !swiftPacks.includes(p) && !iosPacks.includes(p));
+
+    const summaryLines: string[] = [];
+    const hasIOS = signals.xcodePlatforms.includes("iphoneos");
+    if (hasIOS) {
+      summaryLines.push(`Detected: iOS project (${signals.primaryLanguage ?? "swift"})`);
+    } else if (signals.xcodePlatforms.length > 0) {
+      summaryLines.push(`Detected: ${signals.xcodePlatforms.join(", ")} Xcode project (${signals.primaryLanguage ?? "swift"})`);
+    } else {
+      summaryLines.push(`Detected: ${signals.primaryLanguage ?? "unknown"} project`);
+    }
+    summaryLines.push("");
+    summaryLines.push("Recommended skill packs:");
+    if (swiftPacks.length > 0) {
+      summaryLines.push(`  Swift: ${swiftPacks.map((p) => p.label).join(", ")}`);
+    }
+    if (iosPacks.length > 0) {
+      summaryLines.push(`  iOS: ${iosPacks.map((p) => p.label).join(", ")}`);
+    }
+    for (const p of otherPacks) {
+      summaryLines.push(`  • ${p.label}: ${p.description}`);
+    }
+
+    const totalSkills = toInstall.reduce((n, p) => n + p.skills.length, 0);
     const choice = await showNextAction(ctx, {
       title: "GSD — Install Skills",
-      summary: [
-        `Detected: ${signals.primaryLanguage ?? "unknown"} project`,
-        "",
-        "Recommended skill packs:",
-        ...packNames.map((n) => `  • ${n}`),
-      ],
+      summary: summaryLines,
       actions: [
         {
           id: "install",
           label: "Install recommended skills",
-          description: `Install ${toInstall.length} skill pack${toInstall.length > 1 ? "s" : ""} via skills.sh`,
+          description: `Install ${totalSkills} skills from ${toInstall.length} pack${toInstall.length > 1 ? "s" : ""} via skills.sh`,
           recommended: true,
         },
         {
@@ -307,14 +491,13 @@ export async function runSkillInstallStep(
     });
 
     if (choice === "install") {
-      for (const pack of toInstall) {
-        ctx.ui.notify(`Installing ${pack.label} skills...`, "info");
-        const ok = await installSkillPack(pack);
-        if (ok) {
-          installed.push(pack.label);
-        } else {
-          ctx.ui.notify(`Failed to install ${pack.label} — try manually: npx skills add ${pack.repo}`, "info");
-        }
+      const labels = await installPacksBatched(toInstall, (label) => {
+        ctx.ui.notify(`Installing ${label} skills...`, "info");
+      });
+      installed.push(...labels);
+      const failed = toInstall.filter((p) => !installed.includes(p.label));
+      for (const pack of failed) {
+        ctx.ui.notify(`Failed to install ${pack.label} — try manually: npx skills add ${pack.repo}`, "info");
       }
     }
   } else {
@@ -342,14 +525,13 @@ export async function runSkillInstallStep(
       stack.packs.includes(p.label),
     ).filter((p) => !isPackInstalled(p));
 
-    for (const pack of packsToInstall) {
-      ctx.ui.notify(`Installing ${pack.label} skills...`, "info");
-      const ok = await installSkillPack(pack);
-      if (ok) {
-        installed.push(pack.label);
-      } else {
-        ctx.ui.notify(`Failed to install ${pack.label} — try manually: npx skills add ${pack.repo}`, "info");
-      }
+    const labels = await installPacksBatched(packsToInstall, (label) => {
+      ctx.ui.notify(`Installing ${label} skills...`, "info");
+    });
+    installed.push(...labels);
+    const failed = packsToInstall.filter((p) => !installed.includes(p.label));
+    for (const pack of failed) {
+      ctx.ui.notify(`Failed to install ${pack.label} — try manually: npx skills add ${pack.repo}`, "info");
     }
   }
 
