@@ -114,7 +114,7 @@ describe("createRun", () => {
     assert.ok(!existsSync(join(runDir, "PARAMS.json")), "PARAMS.json should not exist without overrides");
 
     // Run directory path matches convention
-    assert.ok(runDir.includes(".gsd/workflow-runs/test-workflow/"), "path should follow convention");
+    assert.ok(runDir.includes(join(".gsd", "workflow-runs", "test-workflow")), "path should follow convention");
   });
 
   it("writes PARAMS.json and substituted prompts when overrides provided", () => {

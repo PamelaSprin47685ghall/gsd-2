@@ -14,7 +14,7 @@
  */
 
 import { readFileSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import type { StepDefinition } from "./definition-loader.js";
 import { readFrozenDefinition } from "./custom-workflow-engine.js";
 
@@ -65,7 +65,7 @@ export function injectContext(
     for (const relPath of refStep.produces) {
       const absPath = resolve(runDir, relPath);
       // Path traversal guard: ensure resolved path stays within runDir
-      if (!absPath.startsWith(resolve(runDir) + "/") && absPath !== resolve(runDir)) {
+      if (!absPath.startsWith(resolve(runDir) + sep) && absPath !== resolve(runDir)) {
         console.warn(
           `context-injector: artifact path "${relPath}" resolves outside runDir — skipping`,
         );

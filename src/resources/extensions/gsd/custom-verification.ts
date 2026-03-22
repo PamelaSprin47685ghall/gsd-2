@@ -18,7 +18,7 @@
  */
 
 import { readFileSync, existsSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { StepDefinition, VerifyPolicy } from "./definition-loader.js";
 import { readFrozenDefinition } from "./custom-workflow-engine.js";
@@ -105,7 +105,7 @@ function handleContentHeuristic(
   for (const relPath of produces) {
     const absPath = resolve(runDir, relPath);
     // Path traversal guard
-    if (!absPath.startsWith(resolve(runDir) + "/") && absPath !== resolve(runDir)) {
+    if (!absPath.startsWith(resolve(runDir) + sep) && absPath !== resolve(runDir)) {
       return "pause";
     }
 
