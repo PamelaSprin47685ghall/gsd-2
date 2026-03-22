@@ -440,6 +440,9 @@ export function detectProjectSignals(basePath: string): ProjectSignals {
   const springBootVersionCatalogs = scannedFiles.filter((file) => file.endsWith("libs.versions.toml"));
   if (containsSpringBootMarker(basePath, springBootBuildFiles, springBootVersionCatalogs)) {
     pushUnique(detectedFiles, "dep:spring-boot");
+    if (!primaryLanguage) {
+      primaryLanguage = springBootBuildFiles.some((file) => file.endsWith("build.gradle.kts")) ? "kotlin" : "java/kotlin";
+    }
   }
 
   // Git repo detection
@@ -770,8 +773,8 @@ function containsDependencyMarker(basePath: string, relativePaths: string[], mar
   for (const relativePath of relativePaths) {
     try {
       const raw = readBounded(join(basePath, relativePath), 64 * 1024);
-      const content = stripDependencyComments(relativePath, raw).toLowerCase();
-      if (marker === "fastapi" && /\bfastapi(?=$|[\s<=>\[\],;"'])/.test(content)) {
+      const content = extractDependencyContent(relativePath, raw).toLowerCase();
+      if (marker === "fastapi" && /\bfastapi(?=$|[\s<=>!~\[\],;"'])/.test(content)) {
         return true;
       }
     } catch {
@@ -793,7 +796,7 @@ function containsSpringBootMarker(
     try {
       const raw = readBounded(join(basePath, relativePath), 64 * 1024);
       const content = stripDependencyComments(relativePath, raw).toLowerCase();
-      if (/(org\.springframework\.boot|spring[-.]boot(?:[-.]starter)?)/.test(content)) {
+      if (/(org\.springframework\.boot|spring-boot(?:-starter)?)/.test(content)) {
         return true;
       }
 
@@ -852,6 +855,62 @@ function stripDependencyComments(relativePath: string, content: string): string 
       .replace(/\/\/.*$/gm, "");
   }
   return content;
+}
+
+function extractDependencyContent(relativePath: string, content: string): string {
+  const stripped = stripDependencyComments(relativePath, content);
+  if (relativePath.endsWith("pyproject.toml")) {
+    return extractPyprojectDependencySections(stripped);
+  }
+  return stripped;
+}
+
+function extractPyprojectDependencySections(content: string): string {
+  const lines = content.split("\n");
+  const collected: string[] = [];
+  let section = "";
+  let collectingProjectDeps = false;
+  let bracketDepth = 0;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (collectingProjectDeps) {
+      collected.push(line);
+      bracketDepth += countChar(line, "[") - countChar(line, "]");
+      if (bracketDepth <= 0) {
+        collectingProjectDeps = false;
+      }
+      continue;
+    }
+
+    const sectionMatch = trimmed.match(/^\[([^\]]+)\]$/);
+    if (sectionMatch) {
+      section = sectionMatch[1].trim();
+      continue;
+    }
+
+    if (section === "project" && /^dependencies\s*=\s*\[/.test(trimmed)) {
+      collected.push(line);
+      bracketDepth = countChar(line, "[") - countChar(line, "]");
+      collectingProjectDeps = bracketDepth > 0;
+      continue;
+    }
+
+    if (
+      section === "project.optional-dependencies" ||
+      section === "tool.poetry.dependencies" ||
+      /^tool\.poetry\.group\.[^.]+\.dependencies$/.test(section)
+    ) {
+      collected.push(line);
+    }
+  }
+
+  return collected.join("\n");
+}
+
+function countChar(text: string, char: string): number {
+  return [...text].filter((c) => c === char).length;
 }
 
 function normalizePluginAlias(alias: string): string {

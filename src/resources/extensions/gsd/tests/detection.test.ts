@@ -782,6 +782,32 @@ test("detectProjectSignals: FastAPI detected via pyproject.toml dependency", () 
   }
 });
 
+test("detectProjectSignals: FastAPI detected with PEP 508 ~= operator", () => {
+  const dir = makeTempDir("signals-fastapi-compatible-release");
+  try {
+    writeFileSync(join(dir, "requirements.txt"), "fastapi~=0.115\n", "utf-8");
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes("dep:fastapi"), "~= should count as a FastAPI dependency");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: pyproject metadata mention does not trigger dep:fastapi", () => {
+  const dir = makeTempDir("signals-fastapi-pyproject-metadata");
+  try {
+    writeFileSync(
+      join(dir, "pyproject.toml"),
+      '[project]\nname = "example"\nkeywords = ["fastapi"]\ndependencies = ["flask>=3.0"]\n',
+      "utf-8",
+    );
+    const signals = detectProjectSignals(dir);
+    assert.ok(!signals.detectedFiles.includes("dep:fastapi"), "metadata-only mentions should not trigger FastAPI detection");
+  } finally {
+    cleanup(dir);
+  }
+});
+
 test("detectProjectSignals: FastAPI comments do not trigger dep:fastapi", () => {
   const dir = makeTempDir("signals-fastapi-comment");
   try {
@@ -875,6 +901,7 @@ test("detectProjectSignals: nested Spring Boot Gradle service emits dep:spring-b
     );
     const signals = detectProjectSignals(dir);
     assert.ok(signals.detectedFiles.includes("dep:spring-boot"), "should detect nested Spring Boot Gradle service");
+    assert.equal(signals.primaryLanguage, "java/kotlin");
   } finally {
     cleanup(dir);
   }
@@ -952,6 +979,23 @@ test("detectProjectSignals: unused Spring Boot alias in libs.versions.toml does 
     );
     const signals = detectProjectSignals(dir);
     assert.ok(!signals.detectedFiles.includes("dep:spring-boot"), "unused Spring Boot aliases should not trigger detection");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: spring-like alias name without Spring Boot id does not emit dep:spring-boot", () => {
+  const dir = makeTempDir("signals-spring-version-catalog-false-alias");
+  try {
+    mkdirSync(join(dir, "gradle"), { recursive: true });
+    writeFileSync(join(dir, "build.gradle.kts"), "plugins { alias(libs.plugins.spring.boot.conventions) }", "utf-8");
+    writeFileSync(
+      join(dir, "gradle", "libs.versions.toml"),
+      "[plugins]\nspring-boot-conventions = { id = 'com.example.conventions', version = '1.0.0' }\n",
+      "utf-8",
+    );
+    const signals = detectProjectSignals(dir);
+    assert.ok(!signals.detectedFiles.includes("dep:spring-boot"), "spring-looking alias names should not imply Spring Boot without matching id");
   } finally {
     cleanup(dir);
   }
