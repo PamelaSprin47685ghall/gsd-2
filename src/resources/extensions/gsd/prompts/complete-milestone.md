@@ -36,7 +36,7 @@ Then:
 **Success path** (all verifications passed — continue with steps 7–11):
 
 7. **Persist completion through `gsd_complete_milestone`.** Call it with: `milestoneId`, `title`, `oneLiner`, `narrative`, `successCriteriaResults`, `definitionOfDoneResults`, `requirementOutcomes`, `keyDecisions`, `keyFiles`, `lessonsLearned`, `followUps`, `deviations`, `verificationPassed: true`. The tool updates the milestone status in the DB, renders `{{milestoneSummaryPath}}`, and validates all slices are complete before proceeding.
-8. Update `.gsd/REQUIREMENTS.md` if any requirement status transitions were validated in step 6.
+8. For each requirement whose status changed in step 6, call `gsd_requirement_update` with the requirement ID and updated `status` and `validation` fields — the tool regenerates `.gsd/REQUIREMENTS.md` automatically.
 9. Update `.gsd/PROJECT.md` to reflect milestone completion and current project state.
 10. Review all slice summaries for cross-cutting lessons, patterns, or gotchas that emerged during this milestone. Append any non-obvious, reusable insights to `.gsd/KNOWLEDGE.md`.
 11. Do not commit manually — the system auto-commits your changes after this unit completes.

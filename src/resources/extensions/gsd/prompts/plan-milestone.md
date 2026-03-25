@@ -48,7 +48,7 @@ Then:
 3. Create the roadmap: decompose into demoable vertical slices — as many as the work genuinely needs, no more. A simple feature might be 1 slice. Don't decompose for decomposition's sake.
 4. Order by risk (high-risk first)
 5. Call `gsd_plan_milestone` to persist the milestone planning fields and slice rows in the DB-backed planning path. Do **not** write `{{outputPath}}`, `ROADMAP.md`, or other planning artifacts manually — the planning tool owns roadmap rendering and persistence.
-6. If planning produced structural decisions (e.g. slice ordering rationale, technology choices, scope exclusions), append them to `.gsd/DECISIONS.md` (use the **Decisions** output template from the inlined context above if the file doesn't exist yet)
+6. If planning produced structural decisions (e.g. slice ordering rationale, technology choices, scope exclusions), call `gsd_decision_save` for each decision — the tool auto-assigns IDs and regenerates `.gsd/DECISIONS.md` automatically.
 
 ## Requirement Mapping Rules
 
