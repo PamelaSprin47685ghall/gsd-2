@@ -126,18 +126,6 @@ export function getNextFallbackModel(
 }
 
 /**
- * Detect whether an error message indicates a transient network error
- * (worth retrying the same model) vs a permanent provider error
- * (auth failure, quota exceeded, etc. -- should fall back immediately).
- */
-export function isTransientNetworkError(errorMsg: string): boolean {
-  if (!errorMsg) return false;
-  const hasNetworkSignal = /network|ECONNRESET|ETIMEDOUT|ECONNREFUSED|socket hang up|fetch failed|connection.*reset|dns/i.test(errorMsg);
-  const hasPermanentSignal = /auth|unauthorized|forbidden|invalid.*key|quota|billing/i.test(errorMsg);
-  return hasNetworkSignal && !hasPermanentSignal;
-}
-
-/**
  * Validate a model ID string.
  * Returns true if the ID looks like a valid model identifier.
  */

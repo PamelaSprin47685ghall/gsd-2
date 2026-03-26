@@ -68,7 +68,6 @@ export {
   resolveModelForUnit,
   resolveModelWithFallbacksForUnit,
   getNextFallbackModel,
-  isTransientNetworkError,
   validateModelId,
   updatePreferencesModels,
   resolveDynamicRoutingConfig,
