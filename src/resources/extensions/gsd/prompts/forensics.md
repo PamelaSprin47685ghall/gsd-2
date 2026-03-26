@@ -16,7 +16,7 @@ GSD extension source code is at: `{{gsdSourceDir}}`
 
 | Domain | Files |
 |--------|-------|
-| **Auto-mode engine** | `auto.ts` `auto-loop.ts` `auto-dispatch.ts` `auto-start.ts` `auto-supervisor.ts` `auto-timers.ts` `auto-timeout-recovery.ts` `auto-unit-closeout.ts` `auto-post-unit.ts` `auto-verification.ts` `auto-recovery.ts` `auto-worktree.ts` `auto-worktree-sync.ts` `auto-model-selection.ts` `auto-budget.ts` `dispatch-guard.ts` |
+| **Auto-mode engine** | `auto.ts` `auto-loop.ts` `auto-dispatch.ts` `auto-start.ts` `auto-supervisor.ts` `auto-timers.ts` `auto-timeout-recovery.ts` `auto-unit-closeout.ts` `auto-post-unit.ts` `auto-verification.ts` `auto-recovery.ts` `auto-worktree.ts` `auto-model-selection.ts` `auto-budget.ts` `dispatch-guard.ts` |
 | **State & persistence** | `state.ts` `types.ts` `files.ts` `paths.ts` `json-persistence.ts` `atomic-write.ts` |
 | **Forensics & recovery** | `forensics.ts` `session-forensics.ts` `crash-recovery.ts` `session-lock.ts` |
 | **Metrics & telemetry** | `metrics.ts` `skill-telemetry.ts` `token-counter.ts` |
