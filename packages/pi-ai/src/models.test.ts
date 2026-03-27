@@ -76,6 +76,39 @@ describe("model registry — custom providers", () => {
 	});
 });
 
+describe("model registry — custom zai provider (GLM-5.1)", () => {
+	it("zai provider includes glm-5.1 from custom models", () => {
+		const models = getModels("zai" as any);
+		const ids = models.map((m) => m.id);
+		assert.ok(ids.includes("glm-5.1"), `Expected "glm-5.1" in zai models, got: ${ids.join(", ")}`);
+	});
+
+	it("glm-5.1 has correct provider and base URL", () => {
+		const model = getModel("zai" as any, "glm-5.1" as any);
+		assert.ok(model, "Expected getModel to return a model for zai/glm-5.1");
+		assert.equal(model.id, "glm-5.1");
+		assert.equal(model.provider, "zai");
+		assert.equal(model.baseUrl, "https://api.z.ai/api/coding/paas/v4");
+		assert.equal(model.api, "openai-completions");
+	});
+
+	it("glm-5.1 has reasoning enabled and correct context window", () => {
+		const model = getModel("zai" as any, "glm-5.1" as any);
+		assert.ok(model);
+		assert.equal(model.reasoning, true);
+		assert.equal(model.contextWindow, 204800);
+		assert.equal(model.maxTokens, 131072);
+	});
+
+	it("custom glm-5.1 does not overwrite generated zai models", () => {
+		const models = getModels("zai" as any);
+		const ids = models.map((m) => m.id);
+		// Generated models must still exist alongside custom glm-5.1
+		assert.ok(ids.includes("glm-5"), "Generated glm-5 should still exist");
+		assert.ok(ids.includes("glm-5-turbo"), "Generated glm-5-turbo should still exist");
+	});
+});
+
 describe("model registry — custom models do not collide with generated models", () => {
 	it("generated providers still exist alongside custom providers", () => {
 		const providers = getProviders();
