@@ -115,15 +115,101 @@ GSD creates and manages all state in `.gsd/`:
   PROJECT.md          # What this project is
   REQUIREMENTS.md     # Capability contract
   DECISIONS.md        # Architectural decisions (append-only)
+  KNOWLEDGE.md        # Persistent project knowledge (patterns, rules, lessons)
   STATE.md            # Current phase and next action
   milestones/
     M001-xxxxx/
       M001-xxxxx-CONTEXT.md    # Scope, constraints, assumptions
       M001-xxxxx-ROADMAP.md    # Slices with checkboxes
+      M001-xxxxx-SUMMARY.md    # Completion summary
       slices/S01/
         S01-PLAN.md            # Tasks
-        tasks/T01-PLAN.md      # Individual task spec
+        S01-SUMMARY.md         # Slice summary
+        tasks/
+          T01-PLAN.md          # Individual task spec
+          T01-SUMMARY.md       # Task completion summary
 ```
 
-You never need to edit these files. GSD manages them. But you can read them to understand progress.
+State is derived from files on disk — checkboxes in ROADMAP.md and PLAN.md are the source of truth for completion. You never need to edit these files. GSD manages them. But you can read them to understand progress.
 </project_structure>
+
+<flags>
+| Flag | Description |
+|------|-------------|
+| `--output-format <fmt>` | `text` (default), `json` (structured result at exit), `stream-json` (JSONL events) |
+| `--json` | Alias for `--output-format stream-json` — JSONL event stream to stdout |
+| `--bare` | Skip CLAUDE.md, AGENTS.md, user settings, user skills. Use for CI/ecosystem runs. |
+| `--resume <id>` | Resume a prior headless session by its session ID |
+| `--timeout N` | Overall timeout in ms (default: 300000, use 0 to disable) |
+| `--model ID` | Override LLM model |
+| `--supervised` | Forward interactive UI requests to orchestrator via stdout/stdin |
+| `--response-timeout N` | Timeout (ms) for orchestrator response in supervised mode (default: 30000) |
+| `--answers <path>` | Pre-supply answers and secrets from JSON file |
+| `--events <types>` | Filter JSONL to specific event types (comma-separated, implies `--json`) |
+| `--verbose` | Show tool calls in progress output |
+| `--context <path>` | Spec file path for `new-milestone` (use `-` for stdin) |
+| `--context-text <text>` | Inline spec text for `new-milestone` |
+| `--auto` | Chain into auto-mode after `new-milestone` |
+</flags>
+
+<answer_injection>
+Pre-supply answers and secrets for fully autonomous runs:
+
+```bash
+gsd headless --answers answers.json --output-format json auto 2>/dev/null
+```
+
+```json
+{
+  "questions": { "question_id": "selected_option" },
+  "secrets": { "API_KEY": "sk-..." },
+  "defaults": { "strategy": "first_option" }
+}
+```
+
+- **questions** — question ID to answer (string for single-select, string[] for multi-select)
+- **secrets** — env var to value, injected into child process environment
+- **defaults.strategy** — `"first_option"` (default) or `"cancel"` for unmatched questions
+
+See `references/answer-injection.md` for the full mechanism.
+</answer_injection>
+
+<event_streaming>
+For real-time monitoring, use JSONL event streaming:
+
+```bash
+gsd headless --json auto 2>/dev/null | while read -r line; do
+  TYPE=$(echo "$line" | jq -r '.type')
+  case "$TYPE" in
+    tool_execution_start) echo "Tool: $(echo "$line" | jq -r '.toolName')" ;;
+    extension_ui_request) echo "GSD: $(echo "$line" | jq -r '.message // .title // empty')" ;;
+    agent_end) echo "Session ended" ;;
+  esac
+done
+```
+
+Filter to specific events: `--events agent_end,execution_complete,extension_ui_request`
+
+Available types: `agent_start`, `agent_end`, `tool_execution_start`, `tool_execution_end`,
+`tool_execution_update`, `extension_ui_request`, `message_start`, `message_end`,
+`message_update`, `turn_start`, `turn_end`, `cost_update`, `execution_complete`.
+</event_streaming>
+
+<all_commands>
+| Command | Purpose |
+|---------|---------|
+| `auto` | Run all queued units until milestone complete or blocked (default) |
+| `next` | Run exactly one unit, then exit |
+| `query` | Instant JSON snapshot — state, next dispatch, costs (no LLM, ~50ms) |
+| `new-milestone` | Create milestone from spec file |
+| `dispatch <phase>` | Force specific phase (research, plan, execute, complete, reassess, uat, replan) |
+| `stop` / `pause` | Control auto-mode |
+| `steer <desc>` | Hard-steer plan mid-execution |
+| `skip` / `undo` | Unit control |
+| `queue` | Queue/reorder milestones |
+| `history` | View execution history |
+| `doctor` | Health check + auto-fix |
+| `knowledge <rule>` | Add persistent project knowledge |
+
+See `references/commands.md` for the complete reference.
+</all_commands>

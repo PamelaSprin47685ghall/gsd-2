@@ -6,6 +6,14 @@ import type { RpcClient, SdkAgentEvent, RpcExtensionUIRequest } from '@gsd-build
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 /**
+ * Per-channel verbosity for Discord event streaming.
+ * - 'default': tool calls, messages, transitions, blockers, errors, completions
+ * - 'verbose': everything including cost_update and status events
+ * - 'quiet': only blockers, errors, completions
+ */
+export type VerbosityLevel = 'default' | 'verbose' | 'quiet';
+
+/**
  * A single structured log entry written as JSON-lines.
  */
 export interface LogEntry {
@@ -24,6 +32,8 @@ export interface DaemonConfig {
     token: string;
     guild_id: string;
     owner_id: string;
+    /** When true, DM the owner on blocker events in addition to channel messages */
+    dm_on_blocker?: boolean;
   };
   projects: {
     scan_roots: string[];
@@ -155,6 +165,20 @@ export interface StartSessionOptions {
 
   /** Path to CLI binary (overrides GSD_CLI_PATH and which resolution) */
   cliPath?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Formatted Event — output of event-formatter.ts
+// ---------------------------------------------------------------------------
+
+/**
+ * Formatted Discord message payload for a GSD event.
+ * content is the plain-text fallback; embeds and components are optional.
+ */
+export interface FormattedEvent {
+  content: string;
+  embed?: import('discord.js').EmbedBuilder;
+  components?: import('discord.js').ActionRowBuilder<import('discord.js').ButtonBuilder>[];
 }
 
 // ---------------------------------------------------------------------------

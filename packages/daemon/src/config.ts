@@ -56,6 +56,7 @@ export function validateConfig(raw: unknown): DaemonConfig {
       token: typeof d['token'] === 'string' ? d['token'] : '',
       guild_id: typeof d['guild_id'] === 'string' ? d['guild_id'] : '',
       owner_id: typeof d['owner_id'] === 'string' ? d['owner_id'] : '',
+      ...(typeof d['dm_on_blocker'] === 'boolean' ? { dm_on_blocker: d['dm_on_blocker'] } : {}),
     };
   }
 
