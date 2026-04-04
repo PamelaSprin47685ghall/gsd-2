@@ -1,5 +1,4 @@
 // GSD Extension — Capability-Aware Router Tests
-// Copyright (c) 2026 Jeremy McSpadden <jeremy@fluxlabs.net>
 // Tests for new capability scoring functions and data tables (Plan 01-01)
 
 import { describe, test } from "node:test";
