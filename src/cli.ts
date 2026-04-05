@@ -298,6 +298,10 @@ if (cliFlags.messages[0] === 'sessions') {
 // `gsd headless` — run auto-mode without TUI
 if (cliFlags.messages[0] === 'headless') {
   await ensureRtkBootstrap()
+  // Sync bundled resources before headless runs (#3471). Without this,
+  // headless-query loads from src/resources/ while auto/interactive load
+  // from ~/.gsd/agent/extensions/ — different extension copies diverge.
+  initResources(agentDir)
   const { runHeadless, parseHeadlessArgs } = await import('./headless.js')
   await runHeadless(parseHeadlessArgs(process.argv))
   process.exit(0)
