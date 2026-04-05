@@ -221,9 +221,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	for (const { name, config } of extensionsForModelResolution.runtime.pendingProviderRegistrations) {
 		modelRegistry.registerProvider(name, config);
 	}
-	// Note: we do NOT clear pendingProviderRegistrations here — bindCore() will iterate
-	// an empty array harmlessly, and clearing here would require the runtime to track
-	// whether the flush already happened.
+	// Clear the queue so bindCore() doesn't re-register the same providers.
+	extensionsForModelResolution.runtime.pendingProviderRegistrations = [];
 
 	// If still no model, use findInitialModel (checks settings default, then provider defaults)
 	if (!model) {

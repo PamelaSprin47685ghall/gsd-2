@@ -149,7 +149,7 @@ export function streamOllamaChat(
 				// Handle text content — process independently of tool_calls
 				// (a chunk may contain both content and tool_calls)
 				const content = chunk.message?.content ?? "";
-				if (content && !chunk.done) {
+				if (content) {
 					if (thinkParser) {
 						processChunks(thinkParser.push(content));
 					} else {

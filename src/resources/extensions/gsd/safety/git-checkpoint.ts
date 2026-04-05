@@ -72,20 +72,10 @@ export function rollbackToCheckpoint(
       return false;
     }
 
-    // Reset working tree
-    execFileSync("git", ["reset", "--hard"], {
-      cwd: basePath,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    // Move branch pointer back to checkpoint
-    execFileSync("git", ["branch", "-f", branch, sha], {
-      cwd: basePath,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    // Sync working tree with moved branch
-    execFileSync("git", ["reset", "--hard"], {
+    // Reset branch pointer and working tree to checkpoint SHA in one step.
+    // Using `git reset --hard <sha>` works on the currently checked-out branch
+    // (unlike `git branch -f` which is rejected for checked-out branches).
+    execFileSync("git", ["reset", "--hard", sha], {
       cwd: basePath,
       stdio: ["ignore", "pipe", "pipe"],
     });
