@@ -776,7 +776,11 @@ export const DISPATCH_RULES: DispatchRule[] = [
         };
       }
       if (artifactCheck === "unknown") {
-        logWarning("dispatch", `Implementation artifact check inconclusive for ${mid} — proceeding with caution`);
+        return {
+          action: "stop",
+          reason: `Cannot verify implementation artifacts for milestone ${mid}: git check was inconclusive. Resolve git issues and retry.`,
+          level: "error",
+        };
       }
 
       // Verification class compliance: if operational verification was planned,

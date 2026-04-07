@@ -393,7 +393,8 @@ export function verifyExpectedArtifact(
   // A milestone with only .gsd/ plan files and zero implementation code is
   // not genuinely complete — the LLM wrote plan files but skipped actual work.
   if (unitType === "complete-milestone") {
-    if (hasImplementationArtifacts(base) === "absent") return false;
+    const artifactResult = hasImplementationArtifacts(base);
+    if (artifactResult === "absent" || artifactResult === "unknown") return false;
   }
 
   return true;
