@@ -118,8 +118,8 @@ export async function handleReopenSlice(
       const sliceUat = join(sliceDir, `${params.sliceId}-UAT.md`);
       if (existsSync(sliceUat)) unlinkSync(sliceUat);
     }
-  } catch {
-    // Non-fatal
+  } catch (cleanupErr) {
+    logWarning("tool", `reopen-slice artifact cleanup warning: ${(cleanupErr as Error).message}`);
   }
   clearPathCache();
 

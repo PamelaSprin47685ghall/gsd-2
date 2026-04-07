@@ -112,8 +112,8 @@ export async function handleReopenTask(
       const summaryPath = join(tasksDir, `${params.taskId}-SUMMARY.md`);
       if (existsSync(summaryPath)) unlinkSync(summaryPath);
     }
-  } catch {
-    // Non-fatal — stale artifact may cause reconciler interference but won't crash
+  } catch (cleanupErr) {
+    logWarning("tool", `reopen-task artifact cleanup warning: ${(cleanupErr as Error).message}`);
   }
   clearPathCache();
 

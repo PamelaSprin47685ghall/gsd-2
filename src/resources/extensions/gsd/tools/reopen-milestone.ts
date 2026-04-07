@@ -23,6 +23,7 @@ import { isClosedStatus } from "../status-guards.js";
 import { renderAllProjections } from "../workflow-projections.js";
 import { writeManifest } from "../workflow-manifest.js";
 import { appendEvent } from "../workflow-events.js";
+import { logWarning } from "../workflow-logger.js";
 import { debugLog } from "../debug-logger.js";
 import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -140,9 +141,7 @@ export async function handleReopenMilestone(
       trigger_reason: params.triggerReason,
     });
   } catch (hookErr) {
-    process.stderr.write(
-      `gsd: reopen-milestone post-mutation hook warning: ${(hookErr as Error).message}\n`,
-    );
+    logWarning("tool", `reopen-milestone post-mutation hook warning: ${(hookErr as Error).message}`);
   }
 
   return {
