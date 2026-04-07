@@ -1187,6 +1187,8 @@ export async function startAuto(
   if (s.paused) {
     const resumeLock = acquireSessionLock(base);
     if (!resumeLock.acquired) {
+      // Reset paused state so isAutoPaused() doesn't stick true after lock failure
+      s.paused = false;
       ctx.ui.notify(`Cannot resume: ${resumeLock.reason}`, "error");
       return;
     }
