@@ -7,6 +7,9 @@
  * Leaf module — no imports from auto/ to avoid circular dependencies.
  */
 
+/** Timeout for postUnitPreVerification in runFinalize (ms). */
+export const FINALIZE_PRE_TIMEOUT_MS = 60_000;
+
 /** Timeout for postUnitPostVerification in runFinalize (ms). */
 export const FINALIZE_POST_TIMEOUT_MS = 60_000;
 
