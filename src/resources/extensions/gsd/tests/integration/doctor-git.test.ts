@@ -661,9 +661,10 @@ describe('doctor-git', async () => {
         env: { ...process.env, GIT_COMMITTER_DATE: pastDate },
       });
 
-      // Modify an already-tracked file (nativeAddTracked uses git add -u,
-      // which only stages tracked files — new untracked files are not staged)
+      // Modify a tracked file and create a new untracked file. The snapshot
+      // must preserve both, not just tracked changes.
       writeFileSync(join(dir, "README.md"), "# test\nmodified content\n");
+      writeFileSync(join(dir, "new-untracked.ts"), "export const preserved = true;\n");
 
       const detect = await runGSDDoctor(dir);
       const staleIssues = detect.issues.filter(i => i.code === "stale_uncommitted_changes");
@@ -681,6 +682,12 @@ describe('doctor-git', async () => {
       // Verify the snapshot commit was created with the gsd snapshot tag
       const log = run("git log -1 --oneline", dir);
       assert.ok(log.includes("gsd snapshot"), "commit is tagged with gsd snapshot");
+
+      const files = run("git show --name-only --format= HEAD", dir);
+      assert.ok(files.includes("README.md"), "snapshot keeps tracked modifications");
+      assert.ok(files.includes("new-untracked.ts"), "snapshot also includes new untracked files");
+      const status = run("git status --short", dir);
+      assert.ok(!status.includes("new-untracked.ts"), "snapshot does not leave the new source file untracked");
     });
 
     // ─── Test: stale_uncommitted_changes NOT flagged when recent commit ──

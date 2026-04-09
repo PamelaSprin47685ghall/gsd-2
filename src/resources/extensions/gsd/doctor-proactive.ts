@@ -21,8 +21,8 @@ import { readCrashLock, isLockProcessAlive, clearLock } from "./crash-recovery.j
 import { abortAndReset } from "./git-self-heal.js";
 import { rebuildState } from "./doctor.js";
 import { deriveState } from "./state.js";
-import { resolveMilestoneIntegrationBranch } from "./git-service.js";
-import { nativeIsRepo, nativeHasChanges, nativeLastCommitEpoch, nativeGetCurrentBranch, nativeAddTracked, nativeCommit } from "./native-git-bridge.js";
+import { RUNTIME_EXCLUSION_PATHS, resolveMilestoneIntegrationBranch } from "./git-service.js";
+import { nativeIsRepo, nativeHasChanges, nativeLastCommitEpoch, nativeGetCurrentBranch, nativeAddAllWithExclusions, nativeCommit } from "./native-git-bridge.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { runEnvironmentChecks } from "./doctor-environment.js";
 
@@ -312,7 +312,7 @@ export async function preDispatchHealthGate(basePath: string): Promise<PreDispat
         if (minutesSinceCommit >= thresholdMinutes) {
           const mins = Math.floor(minutesSinceCommit);
           try {
-            nativeAddTracked(basePath);
+            nativeAddAllWithExclusions(basePath, RUNTIME_EXCLUSION_PATHS);
             const commitMsg = `gsd snapshot: pre-dispatch, uncommitted changes after ${mins}m inactivity`;
             const result = nativeCommit(basePath, commitMsg);
             if (result) {

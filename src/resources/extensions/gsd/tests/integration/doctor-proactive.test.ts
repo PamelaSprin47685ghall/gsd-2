@@ -219,6 +219,39 @@ describe('doctor-proactive', async () => {
       assert.ok(result.fixesApplied.some((f: string) => f.includes("STATE.md")), "reports STATE.md status as info");
     });
 
+    test('health gate: pre-dispatch snapshot includes new untracked files', async () => {
+      const dir = createRepoWithActiveMilestone();
+      cleanups.push(dir);
+
+      const pastDate = new Date(Date.now() - 45 * 60 * 1000).toISOString();
+      run(`git commit --amend --no-edit --date="${pastDate}"`, dir);
+      execSync(`git commit --amend --no-edit`, {
+        cwd: dir,
+        stdio: ["ignore", "pipe", "pipe"],
+        encoding: "utf-8",
+        env: { ...process.env, GIT_COMMITTER_DATE: pastDate },
+      });
+
+      writeFileSync(join(dir, "README.md"), "# test\nmodified content\n");
+      writeFileSync(join(dir, "new-untracked.ts"), "export const preserved = true;\n");
+
+      const result = await preDispatchHealthGate(dir);
+      assert.ok(result.proceed, "dispatch still proceeds after snapshotting");
+      assert.ok(
+        result.fixesApplied.some((f: string) => f.includes("gsd snapshot")),
+        "pre-dispatch gate creates a snapshot commit",
+      );
+
+      const log = run("git log -1 --oneline", dir);
+      assert.ok(log.includes("gsd snapshot"), "snapshot commit is created");
+
+      const files = run("git show --name-only --format= HEAD", dir);
+      assert.ok(files.includes("README.md"), "snapshot keeps tracked modifications");
+      assert.ok(files.includes("new-untracked.ts"), "snapshot also includes new untracked files");
+      const status = run("git status --short", dir);
+      assert.ok(!status.includes("new-untracked.ts"), "snapshot does not leave the new source file untracked");
+    });
+
     test('health gate: stale crash lock auto-cleared', async () => {
       const dir = realpathSync(mkdtempSync(join(tmpdir(), "doc-proactive-")));
       cleanups.push(dir);
