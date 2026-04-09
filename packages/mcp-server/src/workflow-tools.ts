@@ -10,7 +10,7 @@ const SUMMARY_ARTIFACT_TYPES = ["SUMMARY", "RESEARCH", "CONTEXT", "ASSESSMENT", 
 
 type WorkflowToolExecutors = {
   SUPPORTED_SUMMARY_ARTIFACT_TYPES: readonly string[];
-  executeMilestoneStatus: (params: { milestoneId: string }) => Promise<unknown>;
+  executeMilestoneStatus: (params: { milestoneId: string }, basePath?: string) => Promise<unknown>;
   executePlanMilestone: (
     params: {
       milestoneId: string;
@@ -185,6 +185,7 @@ type WorkflowToolExecutors = {
       rationale: string;
       findings?: string;
     },
+    basePath?: string,
   ) => Promise<unknown>;
   executeSummarySave: (
     params: {
@@ -218,6 +219,7 @@ type WorkflowToolExecutors = {
 };
 
 let workflowToolExecutorsPromise: Promise<WorkflowToolExecutors> | null = null;
+let workflowExecutionQueue: Promise<void> = Promise.resolve();
 
 function toFileUrl(modulePath: string): string {
   return pathToFileURL(resolve(modulePath)).href;
@@ -272,13 +274,20 @@ interface McpToolServer {
   ): unknown;
 }
 
-async function withProjectDir<T>(projectDir: string, fn: () => Promise<T>): Promise<T> {
-  const originalCwd = process.cwd();
+async function runSerializedWorkflowOperation<T>(fn: () => Promise<T>): Promise<T> {
+  // The shared DB adapter and workflow log base path are process-global, so
+  // workflow MCP mutations must not overlap within a single server process.
+  const prior = workflowExecutionQueue;
+  let release!: () => void;
+  workflowExecutionQueue = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  await prior;
   try {
-    process.chdir(projectDir);
     return await fn();
   } finally {
-    process.chdir(originalCwd);
+    release();
   }
 }
 
@@ -316,7 +325,7 @@ async function handleTaskComplete(
     >;
   };
   const { executeTaskComplete } = await getWorkflowToolExecutors();
-  return withProjectDir(projectDir, () =>
+  return runSerializedWorkflowOperation(() =>
     executeTaskComplete(
       {
         taskId,
@@ -342,7 +351,7 @@ async function handleSliceComplete(
   args: Record<string, unknown>,
 ): Promise<unknown> {
   const { executeSliceComplete } = await getWorkflowToolExecutors();
-  return withProjectDir(projectDir, () => executeSliceComplete(args as any, projectDir));
+  return runSerializedWorkflowOperation(() => executeSliceComplete(args as any, projectDir));
 }
 
 async function handleReplanSlice(
@@ -350,7 +359,7 @@ async function handleReplanSlice(
   args: Record<string, unknown>,
 ): Promise<unknown> {
   const { executeReplanSlice } = await getWorkflowToolExecutors();
-  return withProjectDir(projectDir, () => executeReplanSlice(args as any, projectDir));
+  return runSerializedWorkflowOperation(() => executeReplanSlice(args as any, projectDir));
 }
 
 async function handleCompleteMilestone(
@@ -358,7 +367,7 @@ async function handleCompleteMilestone(
   args: Record<string, unknown>,
 ): Promise<unknown> {
   const { executeCompleteMilestone } = await getWorkflowToolExecutors();
-  return withProjectDir(projectDir, () => executeCompleteMilestone(args as any, projectDir));
+  return runSerializedWorkflowOperation(() => executeCompleteMilestone(args as any, projectDir));
 }
 
 async function handleValidateMilestone(
@@ -366,7 +375,7 @@ async function handleValidateMilestone(
   args: Record<string, unknown>,
 ): Promise<unknown> {
   const { executeValidateMilestone } = await getWorkflowToolExecutors();
-  return withProjectDir(projectDir, () => executeValidateMilestone(args as any, projectDir));
+  return runSerializedWorkflowOperation(() => executeValidateMilestone(args as any, projectDir));
 }
 
 async function handleReassessRoadmap(
@@ -374,7 +383,7 @@ async function handleReassessRoadmap(
   args: Record<string, unknown>,
 ): Promise<unknown> {
   const { executeReassessRoadmap } = await getWorkflowToolExecutors();
-  return withProjectDir(projectDir, () => executeReassessRoadmap(args as any, projectDir));
+  return runSerializedWorkflowOperation(() => executeReassessRoadmap(args as any, projectDir));
 }
 
 async function handleSaveGateResult(
@@ -382,7 +391,7 @@ async function handleSaveGateResult(
   args: Record<string, unknown>,
 ): Promise<unknown> {
   const { executeSaveGateResult } = await getWorkflowToolExecutors();
-  return withProjectDir(projectDir, () => executeSaveGateResult(args as any));
+  return runSerializedWorkflowOperation(() => executeSaveGateResult(args as any, projectDir));
 }
 
 const completeMilestoneSchema = {
@@ -513,7 +522,7 @@ export function registerWorkflowTools(server: McpToolServer): void {
     async (args: Record<string, unknown>) => {
       const { projectDir, ...params } = args as { projectDir: string } & Record<string, unknown>;
       const { executePlanMilestone } = await getWorkflowToolExecutors();
-      return withProjectDir(projectDir, () => executePlanMilestone(params as any, projectDir));
+      return runSerializedWorkflowOperation(() => executePlanMilestone(params as any, projectDir));
     },
   );
 
@@ -544,7 +553,7 @@ export function registerWorkflowTools(server: McpToolServer): void {
     async (args: Record<string, unknown>) => {
       const { projectDir, ...params } = args as { projectDir: string } & Record<string, unknown>;
       const { executePlanSlice } = await getWorkflowToolExecutors();
-      return withProjectDir(projectDir, () => executePlanSlice(params as any, projectDir));
+      return runSerializedWorkflowOperation(() => executePlanSlice(params as any, projectDir));
     },
   );
 
@@ -759,7 +768,7 @@ export function registerWorkflowTools(server: McpToolServer): void {
         content: string;
       };
       const { executeSummarySave } = await getWorkflowToolExecutors();
-      return withProjectDir(projectDir, () =>
+      return runSerializedWorkflowOperation(() =>
         executeSummarySave({ milestone_id, slice_id, task_id, artifact_type, content }, projectDir),
       );
     },
@@ -839,7 +848,7 @@ export function registerWorkflowTools(server: McpToolServer): void {
     async (args: Record<string, unknown>) => {
       const { projectDir, milestoneId } = args as { projectDir: string; milestoneId: string };
       const { executeMilestoneStatus } = await getWorkflowToolExecutors();
-      return withProjectDir(projectDir, () => executeMilestoneStatus({ milestoneId }));
+      return runSerializedWorkflowOperation(() => executeMilestoneStatus({ milestoneId }, projectDir));
     },
   );
 }

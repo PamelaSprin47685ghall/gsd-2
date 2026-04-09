@@ -84,6 +84,7 @@ describe("workflow MCP tools", () => {
       registerWorkflowTools(server as any);
       const tool = server.tools.find((t) => t.name === "gsd_summary_save");
       assert.ok(tool, "summary tool should be registered");
+      const originalCwd = process.cwd();
 
       const result = await tool!.handler({
         projectDir: base,
@@ -95,6 +96,7 @@ describe("workflow MCP tools", () => {
 
       const text = (result as any).content[0].text as string;
       assert.match(text, /Saved SUMMARY artifact/);
+      assert.equal(process.cwd(), originalCwd, "workflow MCP tools should not mutate process.cwd");
       assert.ok(
         existsSync(join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-SUMMARY.md")),
         "summary file should exist on disk",

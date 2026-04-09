@@ -153,7 +153,7 @@ test("executeMilestoneStatus returns milestone metadata and slice counts", async
       "INSERT OR REPLACE INTO tasks (milestone_id, slice_id, id, title, status) VALUES (?, ?, ?, ?, ?)",
     ).run("M001", "S01", "T01", "Task T01", "pending");
 
-    const result = await inProjectDir(base, () => executeMilestoneStatus({ milestoneId: "M001" }));
+    const result = await inProjectDir(base, () => executeMilestoneStatus({ milestoneId: "M001" }, base));
     const parsed = JSON.parse(result.content[0].text);
 
     assert.equal(parsed.milestoneId, "M001");
@@ -495,7 +495,7 @@ test("executeSaveGateResult validates inputs and persists verdicts", async () =>
       verdict: "pass",
       rationale: "Looks good.",
       findings: "No issues found.",
-    }));
+    }, base));
 
     assert.equal(result.details.operation, "save_gate_result");
     const db = _getAdapter();

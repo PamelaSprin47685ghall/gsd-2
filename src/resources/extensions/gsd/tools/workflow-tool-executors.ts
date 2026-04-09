@@ -52,7 +52,7 @@ export async function executeSummarySave(
   params: SummarySaveParams,
   basePath: string = process.cwd(),
 ): Promise<ToolExecutionResult> {
-  const dbAvailable = await ensureDbOpen();
+  const dbAvailable = await ensureDbOpen(basePath);
   if (!dbAvailable) {
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot save artifact." }],
@@ -157,7 +157,7 @@ export async function executeTaskComplete(
   params: TaskCompleteParams,
   basePath: string = process.cwd(),
 ): Promise<ToolExecutionResult> {
-  const dbAvailable = await ensureDbOpen();
+  const dbAvailable = await ensureDbOpen(basePath);
   if (!dbAvailable) {
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot complete task." }],
@@ -201,7 +201,7 @@ export async function executeSliceComplete(
   params: SliceCompleteExecutorParams,
   basePath: string = process.cwd(),
 ): Promise<ToolExecutionResult> {
-  const dbAvailable = await ensureDbOpen();
+  const dbAvailable = await ensureDbOpen(basePath);
   if (!dbAvailable) {
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot complete slice." }],
@@ -282,7 +282,7 @@ export async function executeCompleteMilestone(
   params: CompleteMilestoneExecutorParams,
   basePath: string = process.cwd(),
 ): Promise<ToolExecutionResult> {
-  const dbAvailable = await ensureDbOpen();
+  const dbAvailable = await ensureDbOpen(basePath);
   if (!dbAvailable) {
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot complete milestone." }],
@@ -320,7 +320,7 @@ export async function executeValidateMilestone(
   params: ValidateMilestoneExecutorParams,
   basePath: string = process.cwd(),
 ): Promise<ToolExecutionResult> {
-  const dbAvailable = await ensureDbOpen();
+  const dbAvailable = await ensureDbOpen(basePath);
   if (!dbAvailable) {
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot validate milestone." }],
@@ -358,7 +358,7 @@ export async function executeReassessRoadmap(
   params: ReassessRoadmapExecutorParams,
   basePath: string = process.cwd(),
 ): Promise<ToolExecutionResult> {
-  const dbAvailable = await ensureDbOpen();
+  const dbAvailable = await ensureDbOpen(basePath);
   if (!dbAvailable) {
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot reassess roadmap." }],
@@ -395,8 +395,9 @@ export async function executeReassessRoadmap(
 
 export async function executeSaveGateResult(
   params: SaveGateResultParams,
+  basePath: string = process.cwd(),
 ): Promise<ToolExecutionResult> {
-  const dbAvailable = await ensureDbOpen();
+  const dbAvailable = await ensureDbOpen(basePath);
   if (!dbAvailable) {
     return {
       content: [{ type: "text", text: "Error: GSD database is not available." }],
@@ -449,7 +450,7 @@ export async function executePlanMilestone(
   params: PlanMilestoneExecutorParams,
   basePath: string = process.cwd(),
 ): Promise<ToolExecutionResult> {
-  const dbAvailable = await ensureDbOpen();
+  const dbAvailable = await ensureDbOpen(basePath);
   if (!dbAvailable) {
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot plan milestone." }],
@@ -486,7 +487,7 @@ export async function executePlanSlice(
   params: PlanSliceExecutorParams,
   basePath: string = process.cwd(),
 ): Promise<ToolExecutionResult> {
-  const dbAvailable = await ensureDbOpen();
+  const dbAvailable = await ensureDbOpen(basePath);
   if (!dbAvailable) {
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot plan slice." }],
@@ -525,7 +526,7 @@ export async function executeReplanSlice(
   params: ReplanSliceExecutorParams,
   basePath: string = process.cwd(),
 ): Promise<ToolExecutionResult> {
-  const dbAvailable = await ensureDbOpen();
+  const dbAvailable = await ensureDbOpen(basePath);
   if (!dbAvailable) {
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot replan slice." }],
@@ -566,9 +567,10 @@ export interface MilestoneStatusParams {
 
 export async function executeMilestoneStatus(
   params: MilestoneStatusParams,
+  basePath: string = process.cwd(),
 ): Promise<ToolExecutionResult> {
   try {
-    const dbAvailable = await ensureDbOpen();
+    const dbAvailable = await ensureDbOpen(basePath);
     if (!dbAvailable) {
       return {
         content: [{ type: "text", text: "Error: GSD database is not available." }],
