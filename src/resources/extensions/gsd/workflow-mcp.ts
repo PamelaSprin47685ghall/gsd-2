@@ -116,12 +116,12 @@ export function detectWorkflowMcpLaunchConfig(
     };
   }
 
-  const bundledCli = getBundledWorkflowMcpCliPath(env);
-  if (bundledCli) {
+  const distCli = resolve(resolvedWorkflowProjectRoot, "packages", "mcp-server", "dist", "cli.js");
+  if (existsSync(distCli)) {
     return {
       name,
       command: process.execPath,
-      args: [bundledCli],
+      args: [distCli],
       cwd: resolvedWorkflowProjectRoot,
       env: {
         ...(gsdCliPath ? { GSD_CLI_PATH: gsdCliPath } : {}),
@@ -131,12 +131,12 @@ export function detectWorkflowMcpLaunchConfig(
     };
   }
 
-  const distCli = resolve(resolvedWorkflowProjectRoot, "packages", "mcp-server", "dist", "cli.js");
-  if (existsSync(distCli)) {
+  const bundledCli = getBundledWorkflowMcpCliPath(env);
+  if (bundledCli) {
     return {
       name,
       command: process.execPath,
-      args: [distCli],
+      args: [bundledCli],
       cwd: resolvedWorkflowProjectRoot,
       env: {
         ...(gsdCliPath ? { GSD_CLI_PATH: gsdCliPath } : {}),
