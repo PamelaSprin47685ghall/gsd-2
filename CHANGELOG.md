@@ -6,6 +6,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.70.0] - 2026-04-10
+
+### Added
+- **mcp-server**: expose ask_user_questions via elicitation
+
+### Fixed
+- **pi-ai**: remove Anthropic OAuth flow for TOS compliance
+- **mcp-server**: hydrate model credentials into env
+- **mcp-server**: hydrate stored tool credentials on startup
+- **gsd**: auto-enable cmux when detected instead of prompting
+- **mcp-server**: URL scheme regex no longer matches Windows drive letters
+
 ## [2.69.0] - 2026-04-10
 
 ### Added
@@ -2684,7 +2696,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - License updated to MIT
 
-[Unreleased]: https://github.com/gsd-build/gsd-2/compare/v2.69.0...HEAD
+[Unreleased]: https://github.com/gsd-build/gsd-2/compare/v2.70.0...HEAD
+[2.70.0]: https://github.com/gsd-build/gsd-2/compare/v2.69.0...v2.70.0
 [2.69.0]: https://github.com/gsd-build/gsd-2/compare/v2.68.1...v2.69.0
 [2.68.1]: https://github.com/gsd-build/gsd-2/compare/v2.68.0...v2.68.1
 [2.68.0]: https://github.com/gsd-build/gsd-2/compare/v2.67.0...v2.68.0
