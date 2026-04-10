@@ -168,7 +168,7 @@ export async function buildBeforeAgentStartResult(
   const injection = await buildGuidedExecuteContextInjection(event.prompt, process.cwd());
 
   // Re-inject forensics context on follow-up turns (#2941)
-  const forensicsInjection = !injection ? buildForensicsContextInjection(process.cwd()) : null;
+  const forensicsInjection = !injection ? buildForensicsContextInjection(process.cwd(), event.prompt) : null;
 
   const worktreeBlock = buildWorktreeContextBlock();
   const fullSystem = `${event.systemPrompt}\n\n[SYSTEM CONTEXT — GSD]\n\n${systemContent}${preferenceBlock}${knowledgeBlock}${codebaseBlock}${memoryBlock}${newSkillsBlock}${worktreeBlock}`;
@@ -481,13 +481,19 @@ function oneLine(text: string): string {
  * Check for an active forensics session and return the prompt content
  * so it can be re-injected on follow-up turns.
  */
-function buildForensicsContextInjection(basePath: string): string | null {
+export function buildForensicsContextInjection(basePath: string, prompt: string): string | null {
   const marker = readForensicsMarker(basePath);
   if (!marker) return null;
 
   // Expire markers older than 2 hours to avoid stale context
   const age = Date.now() - new Date(marker.createdAt).getTime();
   if (age > 2 * 60 * 60 * 1000) {
+    clearForensicsMarker(basePath);
+    return null;
+  }
+
+  const trimmed = prompt.trim().toLowerCase().replace(/[.!?,]+$/g, "");
+  if (trimmed && !RESUME_INTENT_PATTERNS.test(trimmed)) {
     clearForensicsMarker(basePath);
     return null;
   }
