@@ -1175,6 +1175,23 @@ describe("checkFilePathConsistency additional edge cases", () => {
     assert.equal(results![0].blocking, true);
   });
 
+  test("multi-word prose inputs are ignored by path consistency checks", () => {
+    const tasks = [
+      createTask({
+        id: "T01",
+        files: [],
+        inputs: [
+          "Current WIZARD_PRODUCTS enum",
+          "Existing test patterns in wizard.test.ts",
+        ],
+        expected_output: [],
+      }),
+    ];
+
+    const results = checkFilePathConsistency(tasks, "/tmp");
+    assert.equal(results.length, 0, "Prose planning hints should not be treated as missing file paths");
+  });
+
   test("empty inputs array produces no results", () => {
     // A task with no inputs and only files should produce zero results from
     // consistency check — files are not checked (#3626).

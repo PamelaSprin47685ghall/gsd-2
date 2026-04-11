@@ -281,6 +281,38 @@ function extractPathFromAnnotation(raw: string): string {
 }
 
 /**
+ * Planning units sometimes use task.inputs for prose like "Current enum shape"
+ * instead of concrete file paths. Those entries should not fail path checks.
+ * Keep validation for anything that still looks like a real file reference:
+ * explicit backticks, globs, separators, dot-paths, or single-token basenames
+ * like Dockerfile.
+ */
+function shouldValidateInputAsPath(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+
+  if (/^`+[^`]+`+/.test(trimmed)) {
+    return true;
+  }
+
+  const candidate = extractPathFromAnnotation(trimmed);
+  if (!candidate) return false;
+
+  if (!/\s/.test(candidate)) {
+    return true;
+  }
+
+  return (
+    candidate.startsWith("/") ||
+    candidate.startsWith("./") ||
+    candidate.startsWith("../") ||
+    candidate.startsWith("~/") ||
+    /[\\/]/.test(candidate) ||
+    /[*?[\]{}]/.test(candidate)
+  );
+}
+
+/**
  * Build a set of files that will be created by tasks up to (but not including) taskIndex.
  * All paths are normalized for consistent comparison.
  */
@@ -318,6 +350,7 @@ export function checkFilePathConsistency(
     for (const file of filesToCheck) {
       // Skip empty strings
       if (!file.trim()) continue;
+      if (!shouldValidateInputAsPath(file)) continue;
 
       // Normalize path for consistent comparison
       const normalizedFile = normalizeFilePath(file);
@@ -378,6 +411,8 @@ export function checkTaskOrdering(
     const filesToCheck = [...task.inputs];
 
     for (const file of filesToCheck) {
+      if (!shouldValidateInputAsPath(file)) continue;
+
       const normalizedFile = normalizeFilePath(file);
       const creator = fileCreators.get(normalizedFile);
       if (creator && creator.index > i) {
