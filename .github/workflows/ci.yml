@@ -179,6 +179,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Integration tests need the same compiled artifacts as the build job:
+      # - dist/loader.js and packages/pi-coding-agent/dist/** from `npm run build`
+      # - web/node_modules/.bin/next for tests that shell `build:web-host` at runtime
+      # Duplicating the build here (instead of sharing artifacts via needs: build)
+      # preserves wall-clock parallelism with the build job — see PR #4093.
+      - name: Install web host dependencies
+        run: npm --prefix web ci
+
+      - name: Build
+        run: npm run build
+
       - name: Run integration tests
         run: npm run test:integration
 
