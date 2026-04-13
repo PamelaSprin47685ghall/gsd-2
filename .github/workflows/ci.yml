@@ -157,11 +157,30 @@ jobs:
       - name: Run package tests
         run: npm run test:packages
 
-      - name: Run integration tests
-        run: npm run test:integration
-
       - name: Check test coverage thresholds
         run: npm run test:coverage
+
+  integration-tests:
+    timeout-minutes: 15
+    needs: detect-changes
+    if: needs.detect-changes.outputs.docs-only != 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run integration tests
+        run: npm run test:integration
 
   windows-portability:
     timeout-minutes: 25
