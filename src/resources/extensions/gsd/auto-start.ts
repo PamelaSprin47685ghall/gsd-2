@@ -825,12 +825,19 @@ export async function bootstrapAutoSession(
       ? `${s.autoModeStartModel.provider}/${s.autoModeStartModel.id}`
       : ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "default";
 
-    // Flat-rate providers (e.g. GitHub Copilot, claude-code) suppress routing
-    // at dispatch time (#3453) — reflect that in the banner.
-    const { isFlatRateProvider } = await import("./auto-model-selection.js");
+    // Flat-rate providers (e.g. GitHub Copilot, claude-code, user-declared
+    // subscription proxies, externalCli CLIs) suppress routing at dispatch
+    // time (#3453) — reflect that in the banner.  Thread the same
+    // FlatRateContext used by selectAndApplyModel so user-declared
+    // flat-rate providers and externalCli auto-detection are respected.
+    const { isFlatRateProvider, buildFlatRateContext } = await import("./auto-model-selection.js");
+    const bannerPrefs = loadEffectiveGSDPreferences()?.preferences;
     const effectiveProvider = s.autoModeStartModel?.provider ?? ctx.model?.provider;
     const effectivelyEnabled = routingConfig.enabled
-      && !(effectiveProvider && isFlatRateProvider(effectiveProvider));
+      && !(effectiveProvider && isFlatRateProvider(
+        effectiveProvider,
+        buildFlatRateContext(effectiveProvider, ctx, bannerPrefs),
+      ));
 
     // The actual ceiling may come from tier_models.heavy, not the start model.
     const effectiveCeiling = (routingConfig.enabled && routingConfig.tier_models?.heavy)

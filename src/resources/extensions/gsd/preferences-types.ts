@@ -113,6 +113,7 @@ export const KNOWN_PREFERENCE_KEYS = new Set<string>([
   "discuss_preparation",
   "discuss_web_research",
   "discuss_depth",
+  "flat_rate_providers",
 ]);
 
 /** Canonical list of all dispatch unit types. */
@@ -359,6 +360,17 @@ export interface GSDPreferences {
    * Default: "standard".
    */
   discuss_depth?: "quick" | "standard" | "thorough";
+  /**
+   * Extra provider IDs to treat as flat-rate (no cost benefit from dynamic
+   * routing).  Dynamic routing is suppressed for any provider listed here,
+   * in addition to the built-in list (github-copilot, copilot, claude-code)
+   * and any provider auto-detected via `authMode: "externalCli"`.
+   *
+   * Intended for private subscription-backed proxies, enterprise-gated
+   * deployments, and custom CLI wrappers where every request costs the
+   * same regardless of model.  Case-insensitive.
+   */
+  flat_rate_providers?: string[];
 }
 
 export interface LoadedGSDPreferences {

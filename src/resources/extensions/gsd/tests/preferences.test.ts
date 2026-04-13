@@ -134,6 +134,53 @@ test("invalid value types produce errors and fall back to undefined", () => {
   }
 });
 
+test("flat_rate_providers: accepts string array", () => {
+  const { errors, preferences } = validatePreferences({
+    flat_rate_providers: ["my-proxy", "private-cli"],
+  });
+  assert.equal(errors.length, 0);
+  assert.deepEqual(preferences.flat_rate_providers, ["my-proxy", "private-cli"]);
+});
+
+test("flat_rate_providers: trims whitespace and drops empty entries", () => {
+  const { errors, preferences } = validatePreferences({
+    flat_rate_providers: ["  my-proxy  ", "", "   ", "private-cli"],
+  });
+  assert.equal(errors.length, 0);
+  assert.deepEqual(preferences.flat_rate_providers, ["my-proxy", "private-cli"]);
+});
+
+test("flat_rate_providers: non-array rejected", () => {
+  const { errors } = validatePreferences({
+    flat_rate_providers: "my-proxy" as any,
+  });
+  assert.ok(
+    errors.some(e => e.includes("flat_rate_providers")),
+    "should error on non-array value",
+  );
+});
+
+test("flat_rate_providers: non-string elements rejected", () => {
+  const { errors } = validatePreferences({
+    flat_rate_providers: ["ok", 123 as any, "also-ok"],
+  });
+  assert.ok(
+    errors.some(e => e.includes("flat_rate_providers")),
+    "should error when array contains non-strings",
+  );
+});
+
+test("flat_rate_providers is a recognized preference key (no warning)", () => {
+  const { warnings } = validatePreferences({
+    flat_rate_providers: ["my-proxy"],
+  });
+  assert.equal(
+    warnings.filter(w => w.includes("flat_rate_providers")).length,
+    0,
+    "flat_rate_providers must be in KNOWN_PREFERENCE_KEYS",
+  );
+});
+
 test("valid values pass through correctly", () => {
   const { preferences: p1 } = validatePreferences({ budget_enforcement: "halt" });
   assert.equal(p1.budget_enforcement, "halt");
