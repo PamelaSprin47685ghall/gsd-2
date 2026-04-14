@@ -104,6 +104,7 @@ import {
   updateSliceProgressCache,
   unitVerb,
   hideFooter,
+  describeNextUnit,
 } from "./auto-dashboard.js";
 import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -231,6 +232,18 @@ export function detectRogueFileWrites(
   }
 
   return rogues;
+}
+
+export const STEP_COMPLETE_FALLBACK_MESSAGE =
+  "Step complete. Run /clear, then /gsd to continue (or /gsd auto to run continuously).";
+
+export function buildStepCompleteMessage(nextState: import("./types.js").GSDState): string {
+  if (nextState.phase === "complete") {
+    return "Step complete — milestone finished. Run /gsd status to review, or start the next milestone.";
+  }
+  const next = describeNextUnit(nextState);
+  return `Step complete. Next: ${next.label}\n`
+    + `Run /clear, then /gsd to continue (or /gsd auto to run continuously).`;
 }
 
 export interface PreVerificationOpts {
@@ -1025,8 +1038,17 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
     }
   }
 
-  // Step mode → show wizard instead of dispatch
+  // Step mode → show wizard instead of dispatch.
+  // Without this notify(), /gsd in step mode finishes a unit and silently
+  // exits the loop, leaving the user with no hint to /clear and /gsd again.
   if (s.stepMode) {
+    try {
+      const nextState = await deriveState(s.basePath);
+      ctx.ui.notify(buildStepCompleteMessage(nextState), "info");
+    } catch (e) {
+      debugLog("postUnit", { phase: "step-wizard-notify", error: String(e) });
+      ctx.ui.notify(STEP_COMPLETE_FALLBACK_MESSAGE, "info");
+    }
     return "step-wizard";
   }
 
