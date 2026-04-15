@@ -131,13 +131,15 @@ export async function autoLoop(
     let seqCounter = 0;
     const nextSeq = () => ++seqCounter;
     const turnId = randomUUID();
+    s.currentTraceId = flowId;
+    s.currentTurnId = turnId;
     const turnStartedAt = new Date().toISOString();
     let observedUnitType: string | undefined;
     let observedUnitId: string | undefined;
     let turnFinished = false;
     const finishTurn = (
       status: "completed" | "failed" | "paused" | "stopped" | "skipped" | "retry",
-      failureClass: "none" | "unknown" | "manual-attention" | "timeout" | "execution" | "closeout" = "none",
+      failureClass: "none" | "unknown" | "manual-attention" | "timeout" | "execution" | "closeout" | "git" = "none",
       error?: string,
     ): void => {
       if (turnFinished) return;
@@ -155,6 +157,8 @@ export async function autoLoop(
         startedAt: turnStartedAt,
         finishedAt: new Date().toISOString(),
       });
+      s.currentTraceId = null;
+      s.currentTurnId = null;
     };
     deps.uokObserver?.onTurnStart({
       traceId: flowId,
@@ -483,7 +487,10 @@ export async function autoLoop(
         unitId: iterData.unitId,
       });
       if (finalizeResult.action === "break") {
-        finishTurn("stopped", "closeout", "finalize-break");
+        const finalizeFailureClass = finalizeResult.reason === "git-closeout-failure"
+          ? "git"
+          : "closeout";
+        finishTurn("stopped", finalizeFailureClass, "finalize-break");
         break;
       }
       if (finalizeResult.action === "continue") {

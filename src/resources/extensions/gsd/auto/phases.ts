@@ -1219,6 +1219,8 @@ export async function runUnitPhase(
   // unit in the same Node process (see workflow-logger.ts module header).
   _resetLogs();
   s.currentUnit = { type: unitType, id: unitId, startedAt: Date.now() };
+  s.lastGitActionFailure = null;
+  s.lastGitActionStatus = null;
   setCurrentPhase(unitType);
   s.lastToolInvocationError = null; // #2883: clear stale error from previous unit
   const unitStartSeq = ic.nextSeq();
@@ -1727,11 +1729,15 @@ export async function runFinalize(
 
   const preResult = preResultGuard.value;
   if (preResult === "dispatched") {
+    const dispatchedReason = s.lastGitActionFailure
+      ? "git-closeout-failure"
+      : "pre-verification-dispatched";
     debugLog("autoLoop", {
       phase: "exit",
-      reason: "pre-verification-dispatched",
+      reason: dispatchedReason,
+      gitError: s.lastGitActionFailure ?? undefined,
     });
-    return { action: "break", reason: "pre-verification-dispatched" };
+    return { action: "break", reason: dispatchedReason };
   }
   if (preResult === "retry") {
     if (sidecarItem) {

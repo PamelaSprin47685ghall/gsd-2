@@ -29,9 +29,10 @@ import { rebuildState } from "./doctor.js";
 import { parseUnitId } from "./unit-id.js";
 import { closeoutUnit, type CloseoutOptions } from "./auto-unit-closeout.js";
 import {
-  autoCommitCurrentBranch,
+  runTurnGitAction,
   type TaskCommitContext,
-} from "./worktree.js";
+  type TurnGitActionMode,
+} from "./git-service.js";
 import {
   verifyExpectedArtifact,
   resolveExpectedArtifactPath,
@@ -68,6 +69,7 @@ import { writePreExecutionEvidence } from "./verification-evidence.js";
 import { ensureCodebaseMapFresh } from "./codebase-generator.js";
 import { resolveUokFlags } from "./uok/flags.js";
 import { UokGateRunner } from "./uok/gate-runner.js";
+import { writeTurnGitTransaction } from "./uok/gitops.js";
 
 /** Maximum verification retry attempts before escalating to blocker placeholder (#2653). */
 const MAX_VERIFICATION_RETRIES = 3;
@@ -359,10 +361,161 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
     await new Promise(r => setTimeout(r, 100));
   }
 
-  // Auto-commit
+  const prefs = loadEffectiveGSDPreferences()?.preferences;
+  const uokFlags = resolveUokFlags(prefs);
+
+  // Turn-level git action (commit | snapshot | status-only)
   if (s.currentUnit) {
     const unit = s.currentUnit;
-    await autoCommitUnit(s.basePath, unit.type, unit.id, ctx);
+    const turnAction: TurnGitActionMode = uokFlags.gitops ? uokFlags.gitopsTurnAction : "commit";
+    const traceId = s.currentTraceId ?? `turn:${unit.startedAt}`;
+    const turnId = s.currentTurnId ?? `${unit.type}/${unit.id}/${unit.startedAt}`;
+    s.lastGitActionFailure = null;
+    s.lastGitActionStatus = null;
+    try {
+      let taskContext: TaskCommitContext | undefined;
+
+      if (turnAction === "commit" && s.currentUnit.type === "execute-task") {
+        const { milestone: mid, slice: sid, task: tid } = parseUnitId(s.currentUnit.id);
+        if (mid && sid && tid) {
+          const summaryPath = resolveTaskFile(s.basePath, mid, sid, tid, "SUMMARY");
+          if (summaryPath) {
+            try {
+              const summaryContent = await loadFile(summaryPath);
+              if (summaryContent) {
+                const summary = parseSummary(summaryContent);
+                // Look up GitHub issue number for commit linking
+                let ghIssueNumber: number | undefined;
+                try {
+                  const { getTaskIssueNumberForCommit } = await import("../github-sync/sync.js");
+                  ghIssueNumber = getTaskIssueNumberForCommit(s.basePath, mid, sid, tid) ?? undefined;
+                } catch (err) {
+                  // GitHub sync not available — skip
+                  logWarning("engine", `GitHub issue lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+                }
+
+                taskContext = {
+                  taskId: `${sid}/${tid}`,
+                  taskTitle: summary.title?.replace(/^T\d+:\s*/, "") || tid,
+                  oneLiner: summary.oneLiner || undefined,
+                  keyFiles: summary.frontmatter.key_files?.filter(f => !f.includes("{{")) || undefined,
+                  issueNumber: ghIssueNumber,
+                };
+              }
+            } catch (e) {
+              debugLog("postUnit", { phase: "task-summary-parse", error: String(e) });
+            }
+          }
+        }
+      }
+
+      // Invalidate the nativeHasChanges cache before auto-commit (#1853).
+      // The cache has a 10-second TTL and is keyed by basePath.  A stale
+      // `false` result causes autoCommit to skip staging entirely, leaving
+      // code files only in the working tree where they are destroyed by
+      // `git worktree remove --force` during teardown.
+      _resetHasChangesCache();
+
+      const skipLifecycleCommit =
+        turnAction === "commit" && LIFECYCLE_ONLY_UNITS.has(s.currentUnit.type);
+
+      if (skipLifecycleCommit) {
+        debugLog("postUnit", {
+          phase: "git-action-skipped",
+          reason: "lifecycle-only-unit",
+          unitType: s.currentUnit.type,
+          unitId: s.currentUnit.id,
+        });
+      } else {
+        const gitResult = runTurnGitAction({
+          basePath: s.basePath,
+          action: turnAction,
+          unitType: s.currentUnit.type,
+          unitId: s.currentUnit.id,
+          taskContext,
+        });
+
+        if (uokFlags.gitops) {
+          writeTurnGitTransaction({
+            basePath: s.basePath,
+            traceId,
+            turnId,
+            unitType: unit.type,
+            unitId: unit.id,
+            stage: "publish",
+            action: turnAction,
+            push: uokFlags.gitopsTurnPush,
+            status: gitResult.status,
+            error: gitResult.error,
+            metadata: {
+              dirty: gitResult.dirty,
+              commitMessage: gitResult.commitMessage,
+              snapshotLabel: gitResult.snapshotLabel,
+            },
+          });
+        }
+
+        if (gitResult.status === "failed") {
+          s.lastGitActionFailure = gitResult.error ?? `git ${turnAction} failed`;
+          s.lastGitActionStatus = "failed";
+          if (uokFlags.gitops && uokFlags.gates) {
+            const parsed = parseUnitId(unit.id);
+            const gateRunner = new UokGateRunner();
+            gateRunner.register({
+              id: "closeout-git-action",
+              type: "closeout",
+              execute: async () => ({
+                outcome: "fail",
+                failureClass: "git",
+                rationale: `turn git action "${turnAction}" failed`,
+                findings: gitResult.error ?? "unknown git failure",
+              }),
+            });
+            await gateRunner.run("closeout-git-action", {
+              basePath: s.basePath,
+              traceId,
+              turnId,
+              milestoneId: parsed.milestone ?? undefined,
+              sliceId: parsed.slice ?? undefined,
+              taskId: parsed.task ?? undefined,
+              unitType: unit.type,
+              unitId: unit.id,
+            });
+          }
+
+          const failureMsg = `Git ${turnAction} failed: ${(gitResult.error ?? "unknown error").split("\n")[0]}`;
+          if (uokFlags.gitops) {
+            ctx.ui.notify(failureMsg, "error");
+            await pauseAuto(ctx, pi);
+            return "dispatched";
+          }
+          ctx.ui.notify(failureMsg, "warning");
+          debugLog("postUnit", {
+            phase: "git-action-failed-nonblocking",
+            action: turnAction,
+            error: gitResult.error ?? "unknown error",
+          });
+        }
+
+        s.lastGitActionStatus = "ok";
+
+        if (turnAction === "commit" && gitResult.commitMessage) {
+          ctx.ui.notify(`Committed: ${gitResult.commitMessage.split("\n")[0]}`, "info");
+        } else if (turnAction === "snapshot" && gitResult.snapshotLabel) {
+          ctx.ui.notify(`Snapshot recorded: ${gitResult.snapshotLabel}`, "info");
+        }
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      s.lastGitActionFailure = message;
+      s.lastGitActionStatus = "failed";
+      debugLog("postUnit", { phase: "git-action", error: message, action: turnAction });
+      ctx.ui.notify(`Git ${turnAction} failed: ${message.split("\n")[0]}`, uokFlags.gitops ? "error" : "warning");
+      if (uokFlags.gitops) {
+        await pauseAuto(ctx, pi);
+        return "dispatched";
+      }
+    }
 
     // GitHub sync (non-blocking, opt-in)
     await runSafely("postUnit", "github-sync", async () => {
@@ -871,6 +1024,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
     s.currentUnit &&
     s.currentUnit.type === "plan-slice"
   ) {
+    const currentUnit = s.currentUnit;
     let preExecPauseNeeded = false;
     await runSafely("postUnitPostVerification", "pre-execution-checks", async () => {
       const prefs = loadEffectiveGSDPreferences()?.preferences;
@@ -890,7 +1044,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
         }
 
         // Parse the unit ID to get milestone/slice IDs
-        const { milestone: mid, slice: sid } = parseUnitId(s.currentUnit!.id);
+        const { milestone: mid, slice: sid } = parseUnitId(currentUnit.id);
         if (!mid || !sid) {
           debugLog("postUnitPostVerification", {
             phase: "pre-execution-checks",
@@ -957,12 +1111,12 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
           });
           await gateRunner.run("pre-execution-checks", {
             basePath: s.basePath,
-            traceId: `pre-execution:${s.currentUnit.id}`,
-            turnId: s.currentUnit.id,
+            traceId: `pre-execution:${currentUnit.id}`,
+            turnId: currentUnit.id,
             milestoneId: mid,
             sliceId: sid,
-            unitType: s.currentUnit.type,
-            unitId: s.currentUnit.id,
+            unitType: currentUnit.type,
+            unitId: currentUnit.id,
           });
         }
 

@@ -203,6 +203,7 @@ import { bootstrapAutoSession, openProjectDbIfPresent, type BootstrapDeps } from
 import { initHealthWidget } from "./health-widget.js";
 import { autoLoop, resolveAgentEnd, resolveAgentEndCancelled, _resetPendingResolve, isSessionSwitchInFlight, type LoopDeps, type ErrorContext } from "./auto-loop.js";
 import { runAutoLoopWithUok } from "./uok/kernel.js";
+import { resolveUokFlags } from "./uok/flags.js";
 // Slice-level parallelism (#2340)
 import { getEligibleSlices } from "./slice-parallel-eligibility.js";
 import { startSliceParallel } from "./slice-parallel-orchestrator.js";
@@ -606,11 +607,29 @@ function buildSnapshotOpts(
   continueHereFired?: boolean;
   promptCharCount?: number;
   baselineCharCount?: number;
+  traceId?: string;
+  turnId?: string;
+  gitAction?: "commit" | "snapshot" | "status-only";
+  gitPush?: boolean;
+  gitStatus?: "ok" | "failed";
+  gitError?: string;
 } & Record<string, unknown> {
+  const prefs = loadEffectiveGSDPreferences()?.preferences;
+  const uokFlags = resolveUokFlags(prefs);
   return {
     ...(s.autoStartTime > 0 ? { autoSessionKey: String(s.autoStartTime) } : {}),
     promptCharCount: s.lastPromptCharCount,
     baselineCharCount: s.lastBaselineCharCount,
+    traceId: s.currentTraceId ?? undefined,
+    turnId: s.currentTurnId ?? undefined,
+    ...(uokFlags.gitops
+      ? {
+          gitAction: uokFlags.gitopsTurnAction,
+          gitPush: uokFlags.gitopsTurnPush,
+          gitStatus: s.lastGitActionStatus ?? undefined,
+          gitError: s.lastGitActionFailure ?? undefined,
+        }
+      : {}),
     ...(s.currentUnitRouting ?? {}),
   };
 }
