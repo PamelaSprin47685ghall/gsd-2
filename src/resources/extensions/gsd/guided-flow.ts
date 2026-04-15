@@ -272,7 +272,7 @@ export function checkAutoStartAfterDiscuss(): boolean {
   try { unlinkSync(manifestPath); } catch (e) { logWarning("guided", `manifest unlink failed: ${(e as Error).message}`); }
 
   pendingAutoStartMap.delete(basePath);
-  ctx.ui.notify(`Milestone ${milestoneId} ready.`, "info");
+  ctx.ui.notify(`Milestone ${milestoneId} ready.`, "success");
   startAutoDetached(ctx, pi, basePath, false, { step });
   return true;
 }

@@ -428,6 +428,23 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	/**
+	 * Mark a tool call as historical when replaying from session context and
+	 * no matching tool result is available. Happens after compaction squashes
+	 * tool_result messages out of history — the tool call block survives but
+	 * the result is gone. Without this, the component stays in "Running" state
+	 * forever even though the tool completed long ago.
+	 */
+	markHistoricalNoResult(): void {
+		if (this.result) return; // real result already set, nothing to do
+		this.isPartial = false;
+		this.result = {
+			content: [],
+			isError: false,
+		};
+		this.updateDisplay();
+	}
+
+	/**
 	 * Finalize a pending tool call as failed/interrupted while preserving any streamed partial output.
 	 */
 	completeWithError(message?: string): void {

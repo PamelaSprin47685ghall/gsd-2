@@ -1827,6 +1827,8 @@ export class InteractiveMode {
 			this.showError(message);
 		} else if (type === "warning") {
 			this.showWarning(message);
+		} else if (type === "success") {
+			this.showSuccess(message);
 		} else {
 			this.showStatus(message, { append: true });
 		}
@@ -2339,6 +2341,12 @@ export class InteractiveMode {
 			}
 		}
 
+		// Any pendingTools entries left over after replay are historical tool
+		// calls whose results were squashed out of session context (commonly by
+		// compaction). Mark them finished so the frame stops showing "Running".
+		for (const component of this.pendingTools.values()) {
+			component.markHistoricalNoResult();
+		}
 		this.pendingTools.clear();
 		this.trimChatHistory();
 		this.ui.requestRender();
@@ -2734,6 +2742,17 @@ export class InteractiveMode {
 	showWarning(warningMessage: string): void {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(theme.fg("warning", `Warning: ${warningMessage}`), 1, 0));
+		this.ui.requestRender();
+	}
+
+	showSuccess(successMessage: string): void {
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("success", text)));
+		this.chatContainer.addChild(
+			new Text(theme.fg("success", successMessage), 1, 0),
+		);
+		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("success", text)));
+		this.chatContainer.addChild(new Spacer(1));
 		this.ui.requestRender();
 	}
 
