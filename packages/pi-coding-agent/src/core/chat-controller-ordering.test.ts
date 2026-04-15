@@ -450,6 +450,89 @@ test("chat-controller keeps pre-tool thinking visible for claude-code MCP turns 
 	await handleAgentEvent(host, { type: "message_end", message: makeAssistant([thinkingOnly[0], mcpTool]) } as any);
 });
 
+test("chat-controller keeps pre-tool question text for claude-code MCP when post-tool prose exists", async () => {
+	(globalThis as any)[Symbol.for("@gsd/pi-coding-agent:theme")] = {
+		fg: (_key: string, text: string) => text,
+		bg: (_key: string, text: string) => text,
+		bold: (text: string) => text,
+		italic: (text: string) => text,
+		truncate: (text: string) => text,
+	};
+
+	const host = createHost();
+	host.getMarkdownThemeWithSettings = () => ({});
+
+	const mcpTool = {
+		type: "toolCall",
+		id: "mcp-tool-question-1",
+		name: "glob",
+		mcpServer: "filesystem",
+		arguments: { pattern: "**/*" },
+	};
+
+	await handleAgentEvent(host, { type: "message_start", message: makeAssistant([]) } as any);
+
+	const questionText = { type: "text", text: "Which file should I inspect?" };
+
+	await handleAgentEvent(
+		host,
+		{
+			type: "message_update",
+			message: makeAssistant([questionText]),
+			assistantMessageEvent: {
+				type: "text_delta",
+				contentIndex: 0,
+				delta: questionText.text,
+				partial: makeAssistant([questionText]),
+			},
+		} as any,
+	);
+
+	await handleAgentEvent(
+		host,
+		{
+			type: "message_update",
+			message: makeAssistant([questionText, mcpTool]),
+			assistantMessageEvent: {
+				type: "toolcall_end",
+				contentIndex: 1,
+				toolCall: {
+					...mcpTool,
+					externalResult: {
+						content: [{ type: "text", text: "glob output" }],
+						details: {},
+						isError: false,
+					},
+				},
+				partial: makeAssistant([questionText, mcpTool]),
+			},
+		} as any,
+	);
+
+	const postTool = { type: "text", text: "I'll review that next." };
+	const finalContent = [questionText, mcpTool, postTool];
+	await handleAgentEvent(
+		host,
+		{
+			type: "message_update",
+			message: makeAssistant(finalContent),
+			assistantMessageEvent: {
+				type: "text_delta",
+				contentIndex: 2,
+				delta: postTool.text,
+				partial: makeAssistant(finalContent),
+			},
+		} as any,
+	);
+
+	assert.equal(host.chatContainer.children.length, 3, "question text should remain alongside MCP tool and post-tool prose");
+	assert.equal(host.chatContainer.children[0]?.constructor?.name, "AssistantMessageComponent", "pre-tool question stays visible");
+	assert.equal(host.chatContainer.children[1]?.constructor?.name, "ToolExecutionComponent", "tool renders in the middle");
+	assert.equal(host.chatContainer.children[2]?.constructor?.name, "AssistantMessageComponent", "post-tool prose renders last");
+
+	await handleAgentEvent(host, { type: "message_end", message: makeAssistant(finalContent) } as any);
+});
+
 test("chat-controller prunes orphaned provisional text after claude-code sub-turn shrink when MCP tools appear", async () => {
 	(globalThis as any)[Symbol.for("@gsd/pi-coding-agent:theme")] = {
 		fg: (_key: string, text: string) => text,
