@@ -113,6 +113,7 @@ import {
 import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { _resetHasChangesCache } from "./native-git-bridge.js";
+import { autoCommitCurrentBranch } from "./worktree.js";
 
 // ─── Rogue File Detection ──────────────────────────────────────────────────
 
