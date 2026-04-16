@@ -1139,6 +1139,28 @@ describe("checkTaskOrdering false positive regression (#3677)", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  test("glob-like inputs do not trigger ordering violations against later concrete outputs", () => {
+    const tasks = [
+      createTask({
+        id: "T01",
+        sequence: 0,
+        files: [],
+        inputs: ["Artifacts/pruned_networks/cell_line=*/"],
+        expected_output: [],
+      }),
+      createTask({
+        id: "T02",
+        sequence: 1,
+        files: [],
+        inputs: [],
+        expected_output: ["Artifacts/pruned_networks/cell_line=HT-29/"],
+      }),
+    ];
+
+    const results = checkTaskOrdering(tasks, "/tmp");
+    assert.equal(results.length, 0, "Glob-pattern inputs should not be treated as literal read-before-create dependencies");
+  });
 });
 
 // ─── checkFilePathConsistency additional edge cases ──────────────────────────
@@ -1186,9 +1208,7 @@ describe("checkFilePathConsistency additional edge cases", () => {
     assert.equal(results.length, 0, "Prior annotated expected_output entries should satisfy later plain inputs");
   });
 
-  test("inputs referencing glob-like patterns should not crash", () => {
-    // A glob pattern in inputs is unusual but should be handled gracefully.
-    // The file won't exist on disk, so it should produce a blocking result.
+  test("inputs referencing glob-like patterns are skipped by path consistency checks", () => {
     const tasks = [
       createTask({
         id: "T01",
@@ -1203,8 +1223,7 @@ describe("checkFilePathConsistency additional edge cases", () => {
     assert.doesNotThrow(() => {
       results = checkFilePathConsistency(tasks, "/tmp");
     });
-    assert.equal(results!.length, 1, "Glob-pattern input that doesn't exist should produce a blocking result");
-    assert.equal(results![0].blocking, true);
+    assert.equal(results!.length, 0, "Glob-pattern inputs should not produce false blocking failures");
   });
 
   test("multi-word prose inputs are ignored by path consistency checks", () => {

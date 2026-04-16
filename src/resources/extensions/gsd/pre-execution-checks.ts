@@ -312,6 +312,10 @@ function shouldValidateInputAsPath(raw: string): boolean {
   );
 }
 
+function containsGlobPattern(candidate: string): boolean {
+  return ["*", "?", "[", "]", "{", "}"].some((char) => candidate.includes(char));
+}
+
 /**
  * Build a set of files that will be created by tasks up to (but not including) taskIndex.
  * All paths are normalized for consistent comparison.
@@ -354,6 +358,7 @@ export function checkFilePathConsistency(
 
       // Normalize path for consistent comparison
       const normalizedFile = normalizeFilePath(file);
+      if (containsGlobPattern(normalizedFile)) continue;
 
       // Check if file exists on disk
       const absolutePath = resolve(basePath, normalizedFile);
@@ -414,6 +419,7 @@ export function checkTaskOrdering(
       if (!shouldValidateInputAsPath(file)) continue;
 
       const normalizedFile = normalizeFilePath(file);
+      if (containsGlobPattern(normalizedFile)) continue;
       const creator = fileCreators.get(normalizedFile);
       const absolutePath = resolve(basePath, normalizedFile);
       const existsOnDisk = existsSync(absolutePath);
