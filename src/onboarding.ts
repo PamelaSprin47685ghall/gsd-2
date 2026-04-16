@@ -160,6 +160,25 @@ function openBrowser(url: string): void {
   }
 }
 
+/**
+ * Persist the selected default provider to settings.json.
+ *
+ * This ensures first startup after onboarding prefers the provider the user
+ * just configured, instead of falling back to the first "available" provider
+ * (which can be influenced by unrelated env auth like AWS_PROFILE).
+ */
+function persistDefaultProvider(providerId: string): void {
+  const settingsPath = join(agentDir, 'settings.json')
+  try {
+    const raw = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf-8')) : {}
+    raw.defaultProvider = providerId
+    mkdirSync(dirname(settingsPath), { recursive: true })
+    writeFileSync(settingsPath, JSON.stringify(raw, null, 2), 'utf-8')
+  } catch {
+    // Non-fatal: startup fallback logic will still run.
+  }
+}
+
 /** Sentinel returned by runStep when the user cancels — tells the caller
  *  to abort the entire wizard. */
 const STEP_CANCELLED = Symbol('step-cancelled')
@@ -349,15 +368,8 @@ async function runLlmStep(p: ClackModule, pc: PicoModule, authStorage: AuthStora
     p.log.info('Your Claude subscription will be used for inference. No API key needed.')
     // Store sentinel so hasAuth('claude-code') returns true on future boots
     authStorage.set('claude-code', { type: 'api_key', key: 'cli' })
-    // Persist claude-code as the default provider so the startup migration in
-    // cli.ts does not need to fire and the user is not left on "anthropic".
-    const settingsPath = join(agentDir, 'settings.json')
-    try {
-      const raw = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf-8')) : {}
-      raw.defaultProvider = 'claude-code'
-      mkdirSync(dirname(settingsPath), { recursive: true })
-      writeFileSync(settingsPath, JSON.stringify(raw, null, 2), 'utf-8')
-    } catch { /* non-fatal — startup migration will catch it */ }
+    // Persist claude-code so startup does not keep users on anthropic direct API.
+    persistDefaultProvider('claude-code')
     return true
   }
 
@@ -454,6 +466,7 @@ async function runOAuthFlow(
     }
 
     await authStorage.login(providerId as LoginProviderId, loginCallbacks)
+    persistDefaultProvider(providerId)
 
     p.log.success(`Authenticated with ${pc.green(providerName)}`)
     return true
@@ -502,6 +515,7 @@ async function runApiKeyFlow(
   }
 
   authStorage.set(providerId, { type: 'api_key', key: trimmed })
+  persistDefaultProvider(providerId)
   p.log.success(`API key saved for ${pc.green(providerLabel)}`)
 
   // Provider-specific post-setup hints
@@ -535,6 +549,7 @@ async function runOllamaLocalFlow(
       s.stop(`Ollama is running at ${pc.green(host)}`)
       // Store a placeholder so the provider is recognized as authenticated
       authStorage.set('ollama', { type: 'api_key', key: 'ollama' })
+      persistDefaultProvider('ollama')
       p.log.success(`${pc.green('Ollama (Local)')} configured — no API key needed`)
       p.log.info(pc.dim('Models are discovered automatically from your local Ollama instance.'))
       return true
@@ -557,6 +572,7 @@ async function runOllamaLocalFlow(
   if (p.isCancel(proceed) || !proceed) return false
 
   authStorage.set('ollama', { type: 'api_key', key: 'ollama' })
+  persistDefaultProvider('ollama')
   p.log.success(`${pc.green('Ollama (Local)')} saved — models will appear when Ollama is running`)
   return true
 }
@@ -609,6 +625,7 @@ async function runCustomOpenAIFlow(
 
   // Save API key to auth storage
   authStorage.set('custom-openai', { type: 'api_key', key: trimmedKey })
+  persistDefaultProvider('custom-openai')
 
   // Write or merge into models.json
   const modelsJsonPath = join(agentDir, 'models.json')
