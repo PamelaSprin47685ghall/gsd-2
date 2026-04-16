@@ -489,9 +489,8 @@ export async function runPreDispatch(
             return { action: "break", reason: "slice-parallel-dispatched" };
           }
           // Fall through to sequential if no workers started
-  }
-}
-
+        }
+      }
     } catch (err) {
       debugLog("autoLoop", {
         phase: "slice-parallel-check-error",
