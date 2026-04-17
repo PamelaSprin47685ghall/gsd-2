@@ -1,19 +1,19 @@
-name: Dev Publish
+name: Next Publish
 
-# Manual dev release. Click "Run workflow" in the Actions tab to stamp a dev
-# version and publish @dev to npm. Optional approval gate via the `dev`
+# Manual pre-release. Click "Run workflow" in the Actions tab to stamp a
+# version and publish @next to npm. Optional approval gate via the `next`
 # GitHub Environment (configure reviewers in repo Settings -> Environments).
 
 on:
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Branch or SHA to publish as @dev'
+        description: 'Branch or SHA to publish as @next'
         required: false
-        default: 'dev'
+        default: 'next'
 
 concurrency:
-  group: dev-publish-${{ github.event.inputs.ref }}
+  group: next-publish-${{ github.event.inputs.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -21,10 +21,10 @@ permissions:
   packages: write
 
 jobs:
-  dev-publish:
-    name: Dev Publish
+  next-publish:
+    name: Next Publish
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    environment: dev
+    environment: next
     container:
       image: ghcr.io/gsd-build/gsd-ci-builder:latest
       credentials:
@@ -35,7 +35,7 @@ jobs:
         BLACKSMITH_CACHE_URL: ${{ env.BLACKSMITH_CACHE_URL }}
         GITHUB_REPO_NAME: ${{ github.repository }}
     outputs:
-      dev-version: ${{ steps.stamp.outputs.version }}
+      next-version: ${{ steps.stamp.outputs.version }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -73,16 +73,16 @@ jobs:
       - name: Build web host
         run: npm run build:web-host
 
-      - name: Stamp dev version and sync platform packages
+      - name: Stamp next version and sync platform packages
         id: stamp
         env:
-          VERSION_CHANNEL: dev
+          VERSION_CHANNEL: next
         run: |
           npm run pipeline:version-stamp
           npm run sync-platform-versions
           echo "version=$(node -e 'process.stdout.write(require("./package.json").version)')" >> "$GITHUB_OUTPUT"
 
-      - name: Publish @dev
+      - name: Publish @next
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -90,7 +90,7 @@ jobs:
           if npm view "gsd-pi@${VERSION}" version 2>/dev/null; then
             echo "Version ${VERSION} already published — skipping"
           else
-            npm publish --tag dev
+            npm publish --tag next
           fi
 
       - name: Smoke test

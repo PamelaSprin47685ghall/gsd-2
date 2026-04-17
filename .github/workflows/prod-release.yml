@@ -158,24 +158,24 @@ jobs:
           docker push "ghcr.io/gsd-build/gsd-pi:${RELEASE_VERSION}"
           docker push ghcr.io/gsd-build/gsd-pi:latest
 
-      - name: Open back-merge PR main→dev if behind
+      - name: Open back-merge PR main→next if behind
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT }}
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
-          if ! git ls-remote --exit-code --heads origin dev >/dev/null 2>&1; then
-            echo "dev branch does not exist yet; skipping back-merge"
+          if ! git ls-remote --exit-code --heads origin next >/dev/null 2>&1; then
+            echo "next branch does not exist yet; skipping back-merge"
             exit 0
           fi
-          git fetch origin dev main
-          BEHIND=$(git rev-list --count origin/dev..origin/main)
+          git fetch origin next main
+          BEHIND=$(git rev-list --count origin/next..origin/main)
           if [ "$BEHIND" -gt 0 ]; then
-            BRANCH="backmerge/main-to-dev-v${RELEASE_VERSION}"
+            BRANCH="backmerge/main-to-next-v${RELEASE_VERSION}"
             git checkout -B "$BRANCH" origin/main
             git push origin "$BRANCH" --force-with-lease
-            gh pr create --base dev --head "$BRANCH" \
-              --title "chore: back-merge main to dev (v${RELEASE_VERSION})" \
-              --body "Sync release commit and version bump from main into dev." || true
+            gh pr create --base next --head "$BRANCH" \
+              --title "chore: back-merge main to next (v${RELEASE_VERSION})" \
+              --body "Sync release commit and version bump from main into next." || true
           else
-            echo "dev is up to date with main; no back-merge needed"
+            echo "next is up to date with main; no back-merge needed"
           fi
