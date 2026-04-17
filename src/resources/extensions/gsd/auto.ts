@@ -328,6 +328,7 @@ export function startAutoDetached(
   });
 }
 
+/** Returns true if the project is configured for `isolation:worktree` mode. */
 export function shouldUseWorktreeIsolation(): boolean {
   const prefs = loadEffectiveGSDPreferences()?.preferences?.git;
   if (prefs?.isolation === "worktree") return true;
@@ -1281,6 +1282,11 @@ function buildLoopDeps(): LoopDeps {
   } as unknown as LoopDeps;
 }
 
+/**
+ * Start auto-mode. Handles both fresh-start and resume paths, sets up session
+ * state, enters the milestone worktree or branch, and dispatches the first unit.
+ * No-ops if auto-mode is already active.
+ */
 export async function startAuto(
   ctx: ExtensionCommandContext,
   pi: ExtensionAPI,

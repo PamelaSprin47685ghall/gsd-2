@@ -922,6 +922,7 @@ export function runWorktreePostCreateHook(
 
 // ─── Auto-Worktree Branch Naming ───────────────────────────────────────────
 
+/** Returns the git branch name for a milestone worktree (`milestone/<MID>`). */
 export function autoWorktreeBranch(milestoneId: string): string {
   return `milestone/${milestoneId}`;
 }
