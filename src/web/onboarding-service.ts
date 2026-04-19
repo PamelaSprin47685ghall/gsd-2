@@ -117,6 +117,22 @@ export interface OnboardingBridgeAuthRefreshState {
   error: string | null;
 }
 
+/**
+ * CLI-side onboarding completion record exposed to the web client.
+ *
+ * Mirrors the JSON written by `src/resources/extensions/gsd/onboarding-state.ts`.
+ * Read-only metadata: lets the web UI render "setup complete (date)" indicators
+ * and offer a "re-run setup" affordance. Does NOT influence the `locked` flag —
+ * lock semantics still depend on whether a required provider is configured.
+ */
+export interface OnboardingCompletionRecord {
+  completedAt: string | null;
+  completedSteps: string[];
+  skippedSteps: string[];
+  lastResumePoint: string | null;
+  flowVersion: number;
+}
+
 export interface OnboardingState {
   status: "blocked" | "ready";
   locked: boolean;
@@ -136,6 +152,8 @@ export interface OnboardingState {
   lastValidation: OnboardingValidationResult | null;
   activeFlow: OnboardingProviderFlowState | null;
   bridgeAuthRefresh: OnboardingBridgeAuthRefreshState;
+  /** CLI-side onboarding wizard completion record. Null if never completed. Optional for back-compat with existing fixtures. */
+  completionRecord?: OnboardingCompletionRecord | null;
 }
 
 type ProviderFlowRuntime = {
@@ -739,6 +757,24 @@ export class OnboardingService {
     const optionalSections = this.buildOptionalSectionState(authStorage);
     const lockReason = resolveOnboardingLockReason(Boolean(satisfiedByProvider), this.bridgeAuthRefresh);
 
+    // Read CLI-side completion record (best-effort — never throw)
+    let completionRecord: OnboardingCompletionRecord | null = null;
+    try {
+      const { readOnboardingRecord, isOnboardingComplete } = await import(
+        "../resources/extensions/gsd/onboarding-state.js"
+      );
+      const r = readOnboardingRecord();
+      completionRecord = {
+        completedAt: isOnboardingComplete() ? r.completedAt : null,
+        completedSteps: r.completedSteps,
+        skippedSteps: r.skippedSteps,
+        lastResumePoint: r.lastResumePoint,
+        flowVersion: r.flowVersion,
+      };
+    } catch {
+      completionRecord = null;
+    }
+
     return {
       status: lockReason ? "blocked" : "ready",
       locked: lockReason !== null,
@@ -763,6 +799,7 @@ export class OnboardingService {
       lastValidation: this.lastValidation ? { ...this.lastValidation } : null,
       activeFlow: this.activeFlow ? structuredClone(this.activeFlow.state) : null,
       bridgeAuthRefresh: { ...this.bridgeAuthRefresh },
+      completionRecord,
     };
   }
 

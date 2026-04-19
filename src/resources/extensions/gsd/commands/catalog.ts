@@ -15,7 +15,7 @@ export interface GsdCommandDefinition {
 type CompletionMap = Record<string, readonly GsdCommandDefinition[]>;
 
 export const GSD_COMMAND_DESCRIPTION =
-  "GSD — Get Shit Done: /gsd help|start|templates|next|auto|stop|pause|status|widget|visualize|queue|quick|discuss|capture|triage|dispatch|history|undo|undo-task|reset-slice|rate|skip|export|cleanup|model|mode|prefs|config|keys|hooks|run-hook|skill-health|doctor|debug|logs|forensics|changelog|migrate|remote|steer|knowledge|new-milestone|parallel|cmux|park|unpark|init|setup|inspect|extensions|update|fast|mcp|rethink|codebase|notifications|ship|do|session-report|backlog|pr-branch|add-tests|scan|language";
+  "GSD — Get Shit Done: /gsd help|start|templates|next|auto|stop|pause|status|widget|visualize|queue|quick|discuss|capture|triage|dispatch|history|undo|undo-task|reset-slice|rate|skip|export|cleanup|model|mode|prefs|config|keys|hooks|run-hook|skill-health|doctor|debug|logs|forensics|changelog|migrate|remote|steer|knowledge|new-milestone|parallel|cmux|park|unpark|init|setup|onboarding|inspect|extensions|update|fast|mcp|rethink|codebase|notifications|ship|do|session-report|backlog|pr-branch|add-tests|scan|language";
 
 export const TOP_LEVEL_SUBCOMMANDS: readonly GsdCommandDefinition[] = [
   { cmd: "help", desc: "Categorized command reference with descriptions" },
@@ -44,7 +44,7 @@ export const TOP_LEVEL_SUBCOMMANDS: readonly GsdCommandDefinition[] = [
   { cmd: "model", desc: "Switch the active session model or open a picker" },
   { cmd: "mode", desc: "Switch workflow mode (solo/team)" },
   { cmd: "prefs", desc: "Manage preferences (model selection, timeouts, etc.)" },
-  { cmd: "config", desc: "Set API keys for external tools" },
+  { cmd: "config", desc: "(deprecated) Set tool API keys — use /gsd keys instead" },
   { cmd: "keys", desc: "API key manager — list, add, remove, test, rotate, doctor" },
   { cmd: "hooks", desc: "Show configured post-unit and pre-dispatch hooks" },
   { cmd: "run-hook", desc: "Manually trigger a specific hook" },
@@ -55,7 +55,8 @@ export const TOP_LEVEL_SUBCOMMANDS: readonly GsdCommandDefinition[] = [
   { cmd: "debug", desc: "Create and inspect persistent /gsd debug sessions" },
   { cmd: "forensics", desc: "Examine execution logs" },
   { cmd: "init", desc: "Project init wizard — detect, configure, bootstrap .gsd/" },
-  { cmd: "setup", desc: "Global setup status and configuration" },
+  { cmd: "setup", desc: "Configuration hub: status + sub-routes (llm, model, search, remote, keys, prefs, onboarding)" },
+  { cmd: "onboarding", desc: "Re-run the setup wizard  [--resume|--reset|--step <name>]" },
   { cmd: "migrate", desc: "Migrate a v1 .planning directory to .gsd format" },
   { cmd: "remote", desc: "Control remote auto-mode" },
   { cmd: "steer", desc: "Hard-steer plan documents during execution" },
@@ -115,11 +116,18 @@ const NESTED_COMPLETIONS: CompletionMap = {
     { cmd: "watch", desc: "Live TUI dashboard monitoring all workers" },
   ],
   setup: [
-    { cmd: "llm", desc: "Configure LLM provider settings" },
+    { cmd: "llm", desc: "Configure LLM provider & auth" },
+    { cmd: "model", desc: "Pick default model for the active provider" },
     { cmd: "search", desc: "Configure web search provider" },
-    { cmd: "remote", desc: "Configure remote integrations" },
-    { cmd: "keys", desc: "Manage API keys" },
-    { cmd: "prefs", desc: "Configure global preferences" },
+    { cmd: "remote", desc: "Configure remote integrations (Discord/Slack/Telegram)" },
+    { cmd: "keys", desc: "Manage API keys (alias for /gsd keys)" },
+    { cmd: "prefs", desc: "Global preferences wizard (alias for /gsd prefs)" },
+    { cmd: "onboarding", desc: "Run the full onboarding wizard (alias for /gsd onboarding)" },
+  ],
+  onboarding: [
+    { cmd: "--resume", desc: "Resume from the last completed step" },
+    { cmd: "--reset", desc: "Reset onboarding state and start over (does not clear API keys)" },
+    { cmd: "--step", desc: "Run a single step: llm|model|search|remote|tool-keys|prefs|skills|doctor|project" },
   ],
   notifications: [
     { cmd: "clear", desc: "Clear all notifications" },
