@@ -7,7 +7,8 @@
 import type { ExtensionCommandContext } from "@gsd/pi-coding-agent"
 import { AuthStorage } from "@gsd/pi-coding-agent"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join, resolve } from "node:path"
+import { pathToFileURL } from "node:url"
 import {
   ONBOARDING_STEPS,
   isValidStepId,
@@ -45,8 +46,37 @@ type FirstRunWizardModule = {
   runToolKeysStep: (...args: unknown[]) => Promise<unknown>
 }
 async function loadFirstRunWizard(): Promise<FirstRunWizardModule> {
-  const specifier = "../../../../../onboarding.js"
-  return (await import(/* @vite-ignore */ specifier)) as FirstRunWizardModule
+  const candidates: string[] = []
+
+  // Primary deployed path: loader sets GSD_PKG_ROOT (gsd package root).
+  if (process.env.GSD_PKG_ROOT) {
+    candidates.push(pathToFileURL(join(process.env.GSD_PKG_ROOT, "dist", "onboarding.js")).href)
+  }
+
+  // Fallback: derive package root from process entry (typically dist/loader.js).
+  // This keeps /gsd onboarding resilient if GSD_PKG_ROOT is absent.
+  const argvEntry = process.argv[1]
+  if (argvEntry) {
+    const pkgRootFromArgv = resolve(dirname(argvEntry), "..")
+    candidates.push(pathToFileURL(join(pkgRootFromArgv, "dist", "onboarding.js")).href)
+  }
+
+  // Source-tree/dev fallback (works in dist/resources/... and ts test loaders).
+  candidates.push("../../../../../onboarding.js")
+
+  let lastError: unknown = null
+  for (const specifier of candidates) {
+    try {
+      return (await import(/* @vite-ignore */ specifier)) as FirstRunWizardModule
+    } catch (err) {
+      lastError = err
+    }
+  }
+
+  const reason = lastError instanceof Error ? lastError.message : String(lastError)
+  throw new Error(
+    `[gsd] Failed to load onboarding wizard module. Tried: ${candidates.join(", ")}. Last error: ${reason}`,
+  )
 }
 
 interface ParsedArgs {
