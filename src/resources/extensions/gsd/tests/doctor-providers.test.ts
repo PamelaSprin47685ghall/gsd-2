@@ -768,6 +768,37 @@ test("runProviderChecks detects claude.cmd in PATH on Windows (#4503)", { skip: 
   });
 });
 
+test("runProviderChecks detects claude.exe in PATH on Windows (#4548)", { skip: process.platform !== "win32" }, () => {
+  const tmpHome = realpathSync(mkdtempSync(join(tmpdir(), "gsd-providers-cc-exe-home-")));
+  const binDir = join(tmpHome, "bin");
+  mkdirSync(binDir, { recursive: true });
+
+  // Some Windows installs ship a direct claude.exe binary (not a .cmd shim).
+  const fakeClaudeExe = join(binDir, "claude.exe");
+  writeFileSync(fakeClaudeExe, "");
+
+  withEnv({
+    HOME: tmpHome,
+    ANTHROPIC_API_KEY: undefined,
+    ANTHROPIC_OAUTH_TOKEN: undefined,
+    COPILOT_GITHUB_TOKEN: undefined,
+    GH_TOKEN: undefined,
+    GITHUB_TOKEN: undefined,
+    PATH: `${binDir};${process.env.PATH ?? ""}`,
+    PATHEXT: ".COM;.EXE;.BAT;.CMD",
+  }, () => {
+    try {
+      const results = runProviderChecks();
+      const anthropic = results.find(r => r.name === "anthropic");
+      assert.ok(anthropic, "anthropic result should exist");
+      assert.equal(anthropic!.status, "ok", "should be ok when claude.exe is in PATH (#4548)");
+      assert.ok(anthropic!.message.toLowerCase().includes("claude"), "should mention claude-code as source");
+    } finally {
+      rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+});
+
 test("PROVIDER_ROUTES includes google-gemini-cli as route for google (#2922)", async () => {
   const { readFileSync: readFS } = await import("node:fs");
   const { dirname: dirn, join: joinPath } = await import("node:path");

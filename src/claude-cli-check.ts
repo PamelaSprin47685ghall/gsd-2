@@ -16,11 +16,41 @@ import { execFileSync } from 'node:child_process'
 export const CLAUDE_COMMAND = process.platform === 'win32' ? 'claude.cmd' : 'claude'
 
 /**
+ * Ordered list of binary names to probe for the Claude Code CLI.
+ *
+ * Windows installs vary: npm-global installs produce a `claude.cmd` shim,
+ * direct binary installs produce `claude.exe`, and Git Bash wrappers may
+ * expose a bare `claude` shim. Try all three so no valid install is missed.
+ */
+const CLAUDE_COMMAND_CANDIDATES: string[] =
+  process.platform === 'win32' ? [CLAUDE_COMMAND, 'claude.exe', 'claude'] : [CLAUDE_COMMAND]
+
+/**
+ * Try to run `args` against each candidate binary.
+ * Returns the output buffer on first success, throws the last error if all fail.
+ */
+function execClaudeCheck(args: string[]): Buffer {
+  let lastError: unknown
+  for (const command of CLAUDE_COMMAND_CANDIDATES) {
+    try {
+      return execFileSync(command, args, { timeout: 5_000, stdio: 'pipe' })
+    } catch (error) {
+      lastError = error
+      const code = (error as NodeJS.ErrnoException | undefined)?.code
+      // EINVAL can surface on Windows Git Bash for .cmd spawn failures.
+      if (code === 'ENOENT' || code === 'EINVAL') continue
+      throw error
+    }
+  }
+  throw lastError ?? new Error(`Claude CLI not found (tried: ${CLAUDE_COMMAND_CANDIDATES.join(', ')})`)
+}
+
+/**
  * Check if the `claude` binary is installed (regardless of auth state).
  */
 export function isClaudeBinaryInstalled(): boolean {
   try {
-    execFileSync(CLAUDE_COMMAND, ['--version'], { timeout: 5_000, stdio: 'pipe' })
+    execClaudeCheck(['--version'])
     return true
   } catch {
     return false
@@ -32,13 +62,13 @@ export function isClaudeBinaryInstalled(): boolean {
  */
 export function isClaudeCliReady(): boolean {
   try {
-    execFileSync(CLAUDE_COMMAND, ['--version'], { timeout: 5_000, stdio: 'pipe' })
+    execClaudeCheck(['--version'])
   } catch {
     return false
   }
 
   try {
-    const output = execFileSync(CLAUDE_COMMAND, ['auth', 'status'], { timeout: 5_000, stdio: 'pipe' })
+    const output = execClaudeCheck(['auth', 'status'])
       .toString()
       .toLowerCase()
     return !(/not logged in|no credentials|unauthenticated|not authenticated/i.test(output))

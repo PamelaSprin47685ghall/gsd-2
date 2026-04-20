@@ -3585,7 +3585,19 @@ export class InteractiveMode {
 					this.ui.requestRender();
 				},
 				async (provider: string) => {
-					// Enter key → auth setup for selected provider (#3579)
+					// Enter key → auth setup for selected provider (#3579).
+					// Only OAuth providers support the login dialog flow.
+					// externalCli providers (e.g. claude-code) authenticate through
+					// their own CLI — sending them to the OAuth dialog produces
+					// "Unknown OAuth provider: claude-code" (#4548).
+					const isOAuthProvider = this.session.modelRegistry.authStorage
+						.getOAuthProviders()
+						.some((p) => p.id === provider);
+					if (!isOAuthProvider) {
+						done();
+						this.showStatus(`${provider} uses external CLI auth — use /model to select a model or run the provider's own auth command.`);
+						return;
+					}
 					done();
 					await this.showLoginDialog(provider);
 				},

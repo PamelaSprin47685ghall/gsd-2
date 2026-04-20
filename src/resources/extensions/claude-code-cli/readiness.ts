@@ -21,10 +21,11 @@ const CLAUDE_COMMAND = process.platform === "win32" ? "claude.cmd" : "claude";
 
 /**
  * Windows installs vary: some environments expose `claude.cmd` (npm shim),
- * others expose a `claude` shim on PATH (for example Git Bash wrappers).
- * Try both to avoid false "not installed" results in readiness checks.
+ * `claude.exe` (direct binary install), or a bare `claude` shim on PATH
+ * (for example Git Bash wrappers). Try all three to avoid false "not
+ * installed" results in readiness checks.
  */
-const CLAUDE_COMMAND_CANDIDATES = process.platform === "win32" ? [CLAUDE_COMMAND, "claude"] : [CLAUDE_COMMAND];
+const CLAUDE_COMMAND_CANDIDATES = process.platform === "win32" ? [CLAUDE_COMMAND, "claude.exe", "claude"] : [CLAUDE_COMMAND];
 
 function execClaude(args: string[]): Buffer {
 	let lastError: unknown;
