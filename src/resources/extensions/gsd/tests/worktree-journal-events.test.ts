@@ -190,7 +190,12 @@ describe("worktree journal events", () => {
     });
     const resolver = new WorktreeResolver(s, deps);
 
-    resolver.mergeAndExit("M001", makeNotifyCtx());
+    // Since #4380, mergeAndExit re-throws all errors after emitting the journal
+    // event and restoring state — callers must handle the throw.
+    assert.throws(
+      () => resolver.mergeAndExit("M001", makeNotifyCtx()),
+      /conflict in main/,
+    );
 
     const entries = readJournalEntries(tmp);
     const failed = entries.find(e => e.eventType === "worktree-merge-failed");
