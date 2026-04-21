@@ -144,3 +144,26 @@ describe("#3512: pauseAuto and stopAuto must flush queued follow-up messages", (
     );
   });
 });
+
+describe("#4365: tool_execution_start hook must pass toolName to markToolStart", () => {
+  test("tool_execution_start handler passes event.toolName to markToolStart", () => {
+    // The tool_execution_start handler must forward toolName so that
+    // hasInteractiveToolInFlight() can correctly identify ask_user_questions
+    // and prevent the idle watchdog from firing during interactive tool calls.
+    const startMarker = 'pi.on("tool_execution_start", async (event) => {';
+    const endMarker = 'pi.on("tool_execution_end", async (event) => {';
+    const toolExecutionStartSection = registerHooksSrc.slice(
+      registerHooksSrc.indexOf(startMarker),
+      registerHooksSrc.indexOf(endMarker),
+    );
+
+    assert.ok(
+      toolExecutionStartSection.length > 0,
+      "Could not locate tool_execution_start handler section",
+    );
+    assert.ok(
+      toolExecutionStartSection.includes("markToolStart(event.toolCallId, event.toolName)"),
+      "tool_execution_start handler must pass event.toolName to markToolStart so hasInteractiveToolInFlight() works correctly",
+    );
+  });
+});
