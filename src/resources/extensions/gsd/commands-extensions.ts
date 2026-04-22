@@ -11,6 +11,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { dirname, join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
+import { lockSync, unlockSync } from "proper-lockfile";
 import semver from "semver";
 
 const gsdHome = process.env.GSD_HOME || join(homedir(), ".gsd");
@@ -85,6 +86,32 @@ function saveRegistry(registry: ExtensionRegistry): void {
     writeFileSync(tmp, JSON.stringify(registry, null, 2), "utf-8");
     renameSync(tmp, filePath);
   } catch { /* non-fatal */ }
+}
+
+/**
+ * Run a registry load → mutate → save transaction under a cross-process lock.
+ * Prevents two concurrent `gsd extensions install/uninstall/update` invocations
+ * from trampling each other's registry mutations.
+ *
+ * Uses proper-lockfile.lockSync against the registry path. Directory is created
+ * first so locking works on fresh installs. Lock is always released via finally.
+ */
+function withRegistryLock<T>(mutate: (registry: ExtensionRegistry) => T): T {
+  const filePath = getRegistryPath();
+  mkdirSync(dirname(filePath), { recursive: true });
+  // lockSync requires the file to exist — ensure it does before acquiring.
+  if (!existsSync(filePath)) {
+    writeFileSync(filePath, JSON.stringify({ version: 1, entries: {} }, null, 2), "utf-8");
+  }
+  lockSync(filePath, { retries: { retries: 5, minTimeout: 50, maxTimeout: 500 } });
+  try {
+    const registry = loadRegistry();
+    const result = mutate(registry);
+    saveRegistry(registry);
+    return result;
+  } finally {
+    try { unlockSync(filePath); } catch { /* lock may already be gone */ }
+  }
 }
 
 function isEnabled(registry: ExtensionRegistry, id: string): boolean {
@@ -235,17 +262,19 @@ function postInstallValidate(
     return null;
   }
 
-  // Write registry entry with source: "user" and Phase 8 fields
-  const registry = loadRegistry();
-  registry.entries[extensionId] = {
-    id: extensionId,
-    enabled: true,
-    source: "user",
-    version: manifest.version,
-    installedFrom: specifier,
-    installType,
-  };
-  saveRegistry(registry);
+  // Write registry entry with source: "user" and Phase 8 fields.
+  // Wrap in withRegistryLock so concurrent installs serialize rather than
+  // trample each other's entries.
+  withRegistryLock((registry) => {
+    registry.entries[extensionId] = {
+      id: extensionId,
+      enabled: true,
+      source: "user",
+      version: manifest.version,
+      installedFrom: specifier,
+      installType,
+    };
+  });
 
   return extensionId;
 }
@@ -276,46 +305,56 @@ function handleUninstall(id: string | undefined, ctx: ExtensionCommandContext): 
     return;
   }
 
-  const registry = loadRegistry();
-  const entry = registry.entries[id];
+  // Hold the registry lock for the entire uninstall transaction so a concurrent
+  // install can't add or re-enable `id` while we're in the middle of removing it.
+  const result = withRegistryLock((registry) => {
+    const entry = registry.entries[id];
 
-  // Check if extension exists and is user-installed
-  if (!entry || entry.source !== "user") {
-    ctx.ui.notify(
-      `Extension "${id}" not found in registry. Run /gsd extensions list to see installed extensions.`,
-      "warning",
-    );
+    // Check if extension exists and is user-installed
+    if (!entry || entry.source !== "user") {
+      return { ok: false as const, reason: "not-found" as const };
+    }
+
+    const installedExtDir = getInstalledExtDir();
+    const extDir = join(installedExtDir, id);
+
+    // Check for dependents and warn (D-06: warn-then-proceed)
+    const dependents = findDependents(id, installedExtDir);
+
+    // Remove directory first, then registry entry (Pitfall 4 from RESEARCH.md)
+    // If rm fails, do NOT remove registry entry — leaves a recoverable state
+    try {
+      if (existsSync(extDir)) {
+        rmSync(extDir, { recursive: true, force: true });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false as const, reason: "rm-failed" as const, msg };
+    }
+
+    // Remove registry entry (D-07)
+    delete registry.entries[id];
+    return { ok: true as const, dependents };
+  });
+
+  if (!result.ok) {
+    if (result.reason === "not-found") {
+      ctx.ui.notify(
+        `Extension "${id}" not found in registry. Run /gsd extensions list to see installed extensions.`,
+        "warning",
+      );
+    } else if (result.reason === "rm-failed") {
+      ctx.ui.notify(`Failed to remove extension directory for "${id}": ${result.msg}`, "error");
+    }
     return;
   }
 
-  const installedExtDir = getInstalledExtDir();
-  const extDir = join(installedExtDir, id);
-
-  // Check for dependents and warn (D-06: warn-then-proceed)
-  const dependents = findDependents(id, installedExtDir);
-  if (dependents.length > 0) {
+  if (result.dependents.length > 0) {
     ctx.ui.notify(
-      `Warning: the following installed extensions depend on "${id}": ${dependents.join(", ")}. Removing anyway.`,
+      `Warning: the following installed extensions depend on "${id}": ${result.dependents.join(", ")}. Removed anyway.`,
       "warning",
     );
   }
-
-  // Remove directory first, then registry entry (Pitfall 4 from RESEARCH.md)
-  // If rm fails, do NOT remove registry entry — leaves a recoverable state
-  try {
-    if (existsSync(extDir)) {
-      rmSync(extDir, { recursive: true, force: true });
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    ctx.ui.notify(`Failed to remove extension directory for "${id}": ${msg}`, "error");
-    return; // Do NOT remove registry entry — directory still exists
-  }
-
-  // Remove registry entry (D-07)
-  delete registry.entries[id];
-  saveRegistry(registry);
-
   ctx.ui.notify(`Uninstalled "${id}". Restart GSD to deactivate.`, "info");
 }
 
@@ -374,9 +413,23 @@ async function updateSingleExtension(
 
   // npm extension: check for newer version (D-09)
   const current = entry.version ?? "0.0.0";
-  const packageName = entry.installedFrom;
-  if (!packageName) {
+  const specifier = entry.installedFrom;
+  if (!specifier) {
     ctx.ui.notify(`"${id}" has no recorded install source. Reinstall manually.`, "warning");
+    return;
+  }
+
+  // Split npm specifier into name + optional pin.
+  // Scoped (`@scope/name[@version]`) vs unscoped (`name[@version]`).
+  const { name: packageName, pin } = parseNpmSpecifier(specifier);
+
+  // Pinned installs: the user explicitly requested a specific version. Don't
+  // silently upgrade past the pin — tell them to re-install with a new pin.
+  if (pin) {
+    ctx.ui.notify(
+      `"${id}" was installed with a pinned version (${pin}). To update, run: gsd extensions install ${packageName}@<new-version>`,
+      "info",
+    );
     return;
   }
 
@@ -392,6 +445,18 @@ async function updateSingleExtension(
   } else {
     ctx.ui.notify(`"${id}" is already at the latest version (v${current}).`, "info");
   }
+}
+
+/**
+ * Parse an npm specifier into its package name and optional version pin.
+ * Handles scoped (`@scope/name[@version]`) and unscoped (`name[@version]`).
+ */
+function parseNpmSpecifier(specifier: string): { name: string; pin: string | null } {
+  const isScoped = specifier.startsWith("@");
+  const searchFrom = isScoped ? specifier.indexOf("/") + 1 : 0;
+  const atIdx = specifier.indexOf("@", searchFrom);
+  if (atIdx === -1) return { name: specifier, pin: null };
+  return { name: specifier.slice(0, atIdx), pin: specifier.slice(atIdx + 1) };
 }
 
 async function updateAllExtensions(
@@ -699,21 +764,22 @@ function handleEnable(id: string | undefined, ctx: ExtensionCommandContext): voi
     return;
   }
 
-  const registry = loadRegistry();
-  if (isEnabled(registry, id)) {
+  const alreadyEnabled = withRegistryLock((registry) => {
+    if (isEnabled(registry, id)) return true;
+    const entry = registry.entries[id];
+    if (entry) {
+      entry.enabled = true;
+      delete entry.disabledAt;
+      delete entry.disabledReason;
+    } else {
+      registry.entries[id] = { id, enabled: true, source: "bundled" };
+    }
+    return false;
+  });
+  if (alreadyEnabled) {
     ctx.ui.notify(`Extension "${id}" is already enabled.`, "info");
     return;
   }
-
-  const entry = registry.entries[id];
-  if (entry) {
-    entry.enabled = true;
-    delete entry.disabledAt;
-    delete entry.disabledReason;
-  } else {
-    registry.entries[id] = { id, enabled: true, source: "bundled" };
-  }
-  saveRegistry(registry);
   ctx.ui.notify(`Enabled "${id}". Restart GSD to activate.`, "info");
 }
 
@@ -736,27 +802,28 @@ function handleDisable(id: string | undefined, reason: string, ctx: ExtensionCom
     return;
   }
 
-  const registry = loadRegistry();
-  if (!isEnabled(registry, id)) {
+  const alreadyDisabled = withRegistryLock((registry) => {
+    if (!isEnabled(registry, id)) return true;
+    const entry = registry.entries[id];
+    if (entry) {
+      entry.enabled = false;
+      entry.disabledAt = new Date().toISOString();
+      entry.disabledReason = reason || undefined;
+    } else {
+      registry.entries[id] = {
+        id,
+        enabled: false,
+        source: "bundled",
+        disabledAt: new Date().toISOString(),
+        disabledReason: reason || undefined,
+      };
+    }
+    return false;
+  });
+  if (alreadyDisabled) {
     ctx.ui.notify(`Extension "${id}" is already disabled.`, "info");
     return;
   }
-
-  const entry = registry.entries[id];
-  if (entry) {
-    entry.enabled = false;
-    entry.disabledAt = new Date().toISOString();
-    entry.disabledReason = reason || undefined;
-  } else {
-    registry.entries[id] = {
-      id,
-      enabled: false,
-      source: "bundled",
-      disabledAt: new Date().toISOString(),
-      disabledReason: reason || undefined,
-    };
-  }
-  saveRegistry(registry);
   ctx.ui.notify(`Disabled "${id}". Restart GSD to deactivate.`, "info");
 }
 
