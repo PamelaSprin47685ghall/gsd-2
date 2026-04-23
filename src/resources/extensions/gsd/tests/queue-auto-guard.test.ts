@@ -37,15 +37,20 @@ describe("/gsd queue auto-mode guard (#4704)", () => {
 
     const queueBlock = queueBlockMatch[1];
 
-    // Verify isAutoActive guard comes BEFORE showQueue call
-    const guardIndex = queueBlock.indexOf("isAutoActive()");
+    // Verify auto-mode guard comes BEFORE showQueue call. Accepts either the
+    // inline isAutoActive() check (Tier 1) or the shared requireNotAutoActive()
+    // helper (Tier 2 / #4712).
+    const guardIndex = Math.max(
+      queueBlock.indexOf("isAutoActive()"),
+      queueBlock.indexOf("requireNotAutoActive("),
+    );
     const showQueueIndex = queueBlock.indexOf("showQueue(");
 
-    assert.ok(guardIndex !== -1, "isAutoActive() guard exists in queue command block");
+    assert.ok(guardIndex !== -1, "auto-mode guard exists in queue command block");
     assert.ok(showQueueIndex !== -1, "showQueue() call exists in queue command block");
     assert.ok(
       guardIndex < showQueueIndex,
-      "isAutoActive() guard appears before showQueue() call",
+      "auto-mode guard appears before showQueue() call",
     );
   });
 
@@ -62,8 +67,8 @@ describe("/gsd queue auto-mode guard (#4704)", () => {
     );
 
     assert.ok(
-      src.includes("/gsd queue cannot run while auto-mode is active"),
-      "error message explains that queue cannot run during auto-mode",
+      src.includes("cannot run while auto-mode is active"),
+      "error message explains that the command cannot run during auto-mode",
     );
     assert.ok(
       src.includes("/gsd stop"),
