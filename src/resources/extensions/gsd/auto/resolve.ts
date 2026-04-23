@@ -11,6 +11,7 @@
 import type { UnitResult, AgentEndEvent, ErrorContext } from "./types.js";
 import type { AutoSession } from "./session.js";
 import { debugLog } from "../debug-logger.js";
+import { bumpTurnGeneration } from "./turn-epoch.js";
 
 // ─── Per-unit one-shot promise state ────────────────────────────────────────
 //
@@ -79,6 +80,12 @@ export function isSessionSwitchInFlight(): boolean {
  */
 export function resolveAgentEndCancelled(errorContext?: ErrorContext): void {
   if (_currentResolve) {
+    // Cancellation supersedes the in-flight turn the same way timeout
+    // recovery does — bump the turn epoch so any lingering writes from the
+    // cancelled turn drop themselves.
+    bumpTurnGeneration(
+      `cancelled:${errorContext?.category ?? "unknown"}`,
+    );
     debugLog("resolveAgentEndCancelled", { status: "resolving-cancelled" });
     const r = _currentResolve;
     _currentResolve = null;

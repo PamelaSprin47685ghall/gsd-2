@@ -2,6 +2,7 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync } from "node
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
+import { isStaleWrite } from "../auto/turn-epoch.js";
 import { withFileLockSync } from "../file-lock.js";
 import { gsdRoot } from "../paths.js";
 import { isDbAvailable, insertAuditEvent } from "../gsd-db.js";
@@ -36,6 +37,8 @@ export function buildAuditEnvelope(args: {
 }
 
 export function emitUokAuditEvent(basePath: string, event: AuditEventEnvelope): void {
+  // Drop writes from a turn superseded by timeout recovery / cancellation.
+  if (isStaleWrite("uok-audit")) return;
   try {
     ensureAuditDir(basePath);
     const path = auditLogPath(basePath);

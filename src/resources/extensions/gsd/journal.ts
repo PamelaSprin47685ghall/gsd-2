@@ -22,6 +22,7 @@ import {
   readFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { isStaleWrite } from "./auto/turn-epoch.js";
 import { withFileLockSync } from "./file-lock.js";
 import { gsdRoot } from "./paths.js";
 import { buildAuditEnvelope, emitUokAuditEvent } from "./uok/audit.js";
@@ -93,6 +94,9 @@ export interface JournalQueryFilters {
  * Never throws — all errors are silently caught.
  */
 export function emitJournalEvent(basePath: string, entry: JournalEntry): void {
+  // Drop writes from a turn superseded by timeout recovery / cancellation.
+  // See auto/turn-epoch.ts for the full rationale.
+  if (isStaleWrite("journal")) return;
   try {
     const journalDir = join(gsdRoot(basePath), "journal");
     mkdirSync(journalDir, { recursive: true });
