@@ -26,6 +26,9 @@ import {
   isDbAvailable,
   getMilestone,
   getMilestoneSlices,
+  closeDatabase,
+  openDatabase,
+  getDbPath,
 } from "./gsd-db.js";
 import { atomicWriteSync } from "./atomic-write.js";
 import { execFileSync } from "node:child_process";
@@ -1720,6 +1723,21 @@ export function mergeMilestoneToMain(
   //     entries (e.g. a gitignored `.gsd` symlink under ADR-002) (#4573).
   //     Queued CONTEXT files under `.gsd/milestones/*` are already sheltered
   //     in step 7 above, so they won't be swept into the stash.
+  // On Windows, SQLite holds mandatory file locks on the gsd.db WAL/SHM
+  // sidecars while the connection is open. `git stash --include-untracked`
+  // walks those files and fails with EBUSY (#4704). Close the DB before
+  // stashing so Windows releases the handles; reopen after. No-op on
+  // POSIX, where advisory locks don't block git.
+  const needsDbCycle = process.platform === "win32" && isDbAvailable();
+  const dbPathToReopen = needsDbCycle ? getDbPath() : null;
+  if (needsDbCycle) {
+    try {
+      closeDatabase();
+    } catch (err) {
+      logWarning("worktree", `pre-stash db close failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   let stashed = false;
   try {
     const status = execFileSync("git", ["status", "--porcelain"], {
@@ -1739,6 +1757,14 @@ export function mergeMilestoneToMain(
     // Stash failure is non-fatal — proceed without stash and let the merge
     // report the dirty tree if it fails.
     logWarning("worktree", `git stash failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  if (needsDbCycle && dbPathToReopen) {
+    try {
+      openDatabase(dbPathToReopen);
+    } catch (err) {
+      logWarning("worktree", `post-stash db reopen failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   // 7b. Clean up stale merge state before attempting squash merge (#2912).
