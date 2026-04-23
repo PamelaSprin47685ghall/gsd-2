@@ -706,6 +706,79 @@ test("verifyExpectedArtifact complete-milestone passes with impl files (#1703)",
   }
 });
 
+test("verifyExpectedArtifact complete-milestone fails when DB milestone is not complete (#4658)", () => {
+  const base = makeGitBase();
+  try {
+    execFileSync("git", ["checkout", "-b", "feat/ms-db-active"], { cwd: base, stdio: "ignore" });
+    mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+    writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-SUMMARY.md"), "# Milestone Summary\nverification FAILED — not complete.");
+    mkdirSync(join(base, "src"), { recursive: true });
+    writeFileSync(join(base, "src", "app.ts"), "console.log('hello');");
+    execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "feat: implementation with failed summary"], { cwd: base, stdio: "ignore" });
+
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
+
+    const result = verifyExpectedArtifact("complete-milestone", "M001", base);
+    assert.equal(result, false, "complete-milestone must fail when DB status is not complete");
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("verifyExpectedArtifact complete-milestone passes when DB milestone is complete (#4658)", () => {
+  const base = makeGitBase();
+  try {
+    execFileSync("git", ["checkout", "-b", "feat/ms-db-complete"], { cwd: base, stdio: "ignore" });
+    mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+    writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-SUMMARY.md"), "# Milestone Summary\nDone.");
+    mkdirSync(join(base, "src"), { recursive: true });
+    writeFileSync(join(base, "src", "app.ts"), "console.log('hello');");
+    execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "feat: implementation complete"], { cwd: base, stdio: "ignore" });
+
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Milestone One", status: "complete" });
+
+    const result = verifyExpectedArtifact("complete-milestone", "M001", base);
+    assert.equal(result, true, "complete-milestone should pass when DB status is complete");
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("verifyExpectedArtifact complete-milestone tolerates transient DB lag when SUMMARY is canonical success (#4658)", () => {
+  const base = makeGitBase();
+  try {
+    execFileSync("git", ["checkout", "-b", "feat/ms-db-lag-success"], { cwd: base, stdio: "ignore" });
+    mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+    writeFileSync(
+      join(base, ".gsd", "milestones", "M001", "M001-SUMMARY.md"),
+      [
+        "---",
+        "id: M001",
+        "status: complete",
+        "---",
+        "",
+        "# M001: Success",
+      ].join("\n"),
+    );
+    mkdirSync(join(base, "src"), { recursive: true });
+    writeFileSync(join(base, "src", "app.ts"), "console.log('hello');");
+    execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "feat: implementation with stale db"], { cwd: base, stdio: "ignore" });
+
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
+
+    const result = verifyExpectedArtifact("complete-milestone", "M001", base);
+    assert.equal(result, true, "canonical success SUMMARY should pass verification during transient DB lag");
+  } finally {
+    cleanup(base);
+  }
+});
+
 test("verifyExpectedArtifact checks pending gate-evaluate artifacts without ESM require failures", () => {
   const base = makeTmpProject();
 

@@ -105,6 +105,21 @@ test("#4175: postUnitPreVerification pauses complete-milestone after retries exh
   );
 });
 
+test("#4658: postUnitPreVerification waits briefly for DB-close on complete-milestone before retrying", () => {
+  assert.ok(
+    /async function waitForMilestoneDbClose/.test(postUnitSrc),
+    "auto-post-unit should define a DB settle helper for complete-milestone",
+  );
+  assert.ok(
+    /setTimeout\(resolve,\s*COMPLETE_MILESTONE_DB_SETTLE_POLL_MS\)/.test(postUnitSrc),
+    "DB settle helper should poll with a bounded timeout window",
+  );
+  assert.ok(
+    /s\.currentUnit\.type\s*===\s*"complete-milestone"[\s\S]*waitForMilestoneDbClose/.test(postUnitSrc),
+    "complete-milestone path should invoke DB settle check before retry flow",
+  );
+});
+
 test("#4175: recoverTimedOutUnit pauses complete-milestone instead of writing a blocker placeholder", () => {
   // The complete-milestone pause branch must sit immediately above the
   // "retries exhausted" writeBlockerPlaceholder call so a failed

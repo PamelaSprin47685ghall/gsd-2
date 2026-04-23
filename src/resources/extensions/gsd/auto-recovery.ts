@@ -13,10 +13,12 @@ import { appendEvent } from "./workflow-events.js";
 import { atomicWriteSync } from "./atomic-write.js";
 import { clearParseCache } from "./files.js";
 import { parseRoadmap as parseLegacyRoadmap, parsePlan as parseLegacyPlan } from "./parsers-legacy.js";
-import { isDbAvailable, getTask, getSlice, getSliceTasks, getPendingGates, updateTaskStatus, updateSliceStatus, insertSlice } from "./gsd-db.js";
+import { isDbAvailable, getTask, getSlice, getSliceTasks, getPendingGates, updateTaskStatus, updateSliceStatus, insertSlice, getMilestone } from "./gsd-db.js";
 import { isValidationTerminal } from "./state.js";
 import { getErrorMessage } from "./error-utils.js";
 import { logWarning, logError } from "./workflow-logger.js";
+import { splitFrontmatter, parseFrontmatterMap } from "./files.js";
+import { isClosedStatus } from "./status-guards.js";
 import {
   nativeConflictFiles,
   nativeCommit,
@@ -53,6 +55,32 @@ import {
 
 // Re-export so existing consumers of auto-recovery.ts keep working.
 export { resolveExpectedArtifactPath, diagnoseExpectedArtifact };
+
+export type MilestoneSummaryOutcome = "success" | "failure" | "unknown";
+
+/**
+ * Classify milestone summary content for recovery/dispatch decisions.
+ * - success: canonical completion summary (frontmatter status is closed)
+ * - failure: explicit blocker/failure markers
+ * - unknown: ambiguous content
+ */
+export function classifyMilestoneSummaryContent(content: string): MilestoneSummaryOutcome {
+  const [fmLines] = splitFrontmatter(content);
+  const fm = fmLines ? parseFrontmatterMap(fmLines) : null;
+  const rawStatus = typeof fm?.status === "string" ? fm.status.trim().toLowerCase() : "";
+  if (rawStatus) {
+    if (isClosedStatus(rawStatus)) return "success";
+    if (["active", "pending", "blocked", "failed", "incomplete"].includes(rawStatus)) return "failure";
+  }
+
+  const failureSignal =
+    /(?:^|\n)\s*#\s*BLOCKER\b/i.test(content)
+    || /auto-mode recovery failed/i.test(content)
+    || /verification\s+failed/i.test(content)
+    || /\bnot complete\b/i.test(content);
+  if (failureSignal) return "failure";
+  return "unknown";
+}
 
 // ─── Artifact Resolution & Verification ───────────────────────────────────────
 
@@ -477,6 +505,14 @@ export function verifyExpectedArtifact(
   // A milestone with only .gsd/ plan files and zero implementation code is
   // not genuinely complete — the LLM wrote plan files but skipped actual work.
   if (unitType === "complete-milestone") {
+    const summaryOutcome = classifyMilestoneSummaryContent(readFileSync(absPath, "utf-8"));
+    if (summaryOutcome === "failure") return false;
+    const { milestone: mid } = parseUnitId(unitId);
+    if (mid && isDbAvailable()) {
+      const dbMilestone = getMilestone(mid);
+      if (!dbMilestone) return false;
+      if (!isClosedStatus(dbMilestone.status) && summaryOutcome !== "success") return false;
+    }
     if (hasImplementationArtifacts(base) === "absent") return false;
   }
 

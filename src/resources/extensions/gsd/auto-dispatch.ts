@@ -33,7 +33,7 @@ import { parseRoadmap } from "./parsers-legacy.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { logWarning, logError } from "./workflow-logger.js";
 import { join } from "node:path";
-import { hasImplementationArtifacts } from "./auto-recovery.js";
+import { hasImplementationArtifacts, classifyMilestoneSummaryContent } from "./auto-recovery.js";
 import {
   buildDiscussMilestonePrompt,
   buildResearchMilestonePrompt,
@@ -883,21 +883,13 @@ export const DISPATCH_RULES: DispatchRule[] = [
         }
       }
 
-      // Reconciliation guard (#4324): when the SUMMARY file already exists
-      // on disk but the DB says the milestone is not complete, the DB is
-      // out of sync (e.g. journal reset, partial merge, crash recovery).
-      // Reconcile the DB status directly instead of re-dispatching the
-      // tool, which would overwrite the richer on-disk SUMMARY with a
-      // thinner regenerated version — causing silent data loss.
       const existingSummary = resolveMilestoneFile(basePath, mid, "SUMMARY");
+      let summaryOutcome: "success" | "failure" | "unknown" = "unknown";
       if (existingSummary && isDbAvailable()) {
-        try {
-          updateMilestoneStatus(mid, "complete", new Date().toISOString());
-          logWarning("dispatch", `Milestone ${mid} has SUMMARY on disk but DB status was not complete — reconciled DB to complete (#4324)`);
-        } catch (err) {
-          logWarning("dispatch", `Failed to reconcile milestone ${mid} status: ${err instanceof Error ? err.message : String(err)}`);
+        const summaryContent = await loadFile(existingSummary);
+        if (summaryContent) {
+          summaryOutcome = classifyMilestoneSummaryContent(summaryContent);
         }
-        return { action: "skip" };
       }
 
       // Safety guard (#2675): block completion when VALIDATION verdict is
@@ -980,6 +972,44 @@ export const DISPATCH_RULES: DispatchRule[] = [
         }
       } catch (err) { /* fall through — don't block on DB errors */
         logWarning("dispatch", `verification class check failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      // Disk/DB mismatch handling (#4658): SUMMARY presence alone is not enough.
+      // Apply post-gate policy:
+      // - success summary: reconcile DB and skip re-dispatch
+      // - failure summary: pause/fail-closed
+      // - unknown summary: pause/fail-closed
+      if (existingSummary && isDbAvailable()) {
+        const milestone = getMilestone(mid);
+        const status = milestone?.status ?? "missing";
+
+        if (summaryOutcome === "success") {
+          try {
+            updateMilestoneStatus(mid, "complete", new Date().toISOString());
+            logWarning("dispatch", `Milestone ${mid} SUMMARY indicates completion while DB status was "${status}" — reconciled DB to complete (#4658)`);
+            return { action: "skip" };
+          } catch (err) {
+            return {
+              action: "stop",
+              level: "warning",
+              reason: `Milestone ${mid} SUMMARY indicates completion but DB reconciliation failed (${err instanceof Error ? err.message : String(err)}). Auto-mode paused for manual review.`,
+            };
+          }
+        }
+
+        if (summaryOutcome === "failure") {
+          return {
+            action: "stop",
+            level: "warning",
+            reason: `Milestone ${mid} has a failure-path SUMMARY while DB status is "${status}". Auto-mode will not promote completion from failure artifacts. Re-run complete-milestone only after blockers are resolved and verification passes.`,
+          };
+        }
+
+        return {
+          action: "stop",
+          level: "warning",
+          reason: `Milestone ${mid} has an ambiguous SUMMARY while DB status is "${status}". Auto-mode paused instead of promoting completion from file presence alone.`,
+        };
       }
 
       return {

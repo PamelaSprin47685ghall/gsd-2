@@ -70,9 +70,23 @@ import { ensureCodebaseMapFresh } from "./codebase-generator.js";
 import { resolveUokFlags } from "./uok/flags.js";
 import { UokGateRunner } from "./uok/gate-runner.js";
 import { writeTurnGitTransaction } from "./uok/gitops.js";
+import { isClosedStatus } from "./status-guards.js";
 
 /** Maximum verification retry attempts before escalating to blocker placeholder (#2653). */
 const MAX_VERIFICATION_RETRIES = 3;
+const COMPLETE_MILESTONE_DB_SETTLE_MS = 1500;
+const COMPLETE_MILESTONE_DB_SETTLE_POLL_MS = 100;
+
+async function waitForMilestoneDbClose(mid: string): Promise<boolean> {
+  const deadline = Date.now() + COMPLETE_MILESTONE_DB_SETTLE_MS;
+  while (Date.now() < deadline) {
+    if (!isDbAvailable()) return false;
+    const milestone = getMilestone(mid);
+    if (milestone && isClosedStatus(milestone.status)) return true;
+    await new Promise((resolve) => setTimeout(resolve, COMPLETE_MILESTONE_DB_SETTLE_POLL_MS));
+  }
+  return false;
+}
 
 
 /** Enqueue a sidecar item (hook, triage, or quick-task) for the main loop to
@@ -740,6 +754,25 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
 
       // If verification failed, attempt to regenerate missing projection files
       // from DB data before giving up (e.g. research-slice produces PLAN from engine).
+      if (!triggerArtifactVerified) {
+        if (s.currentUnit.type === "complete-milestone") {
+          try {
+            const { milestone: mid } = parseUnitId(s.currentUnit.id);
+            if (mid) {
+              const settled = await waitForMilestoneDbClose(mid);
+              if (settled) {
+                triggerArtifactVerified = verifyExpectedArtifact(s.currentUnit.type, s.currentUnit.id, s.basePath);
+                if (triggerArtifactVerified) {
+                  invalidateAllCaches();
+                }
+              }
+            }
+          } catch (e) {
+            debugLog("postUnit", { phase: "artifact-verify-settle-db", error: String(e) });
+          }
+        }
+      }
+
       if (!triggerArtifactVerified) {
         try {
           const { milestone: mid, slice: sid } = parseUnitId(s.currentUnit.id);

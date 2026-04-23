@@ -14,6 +14,7 @@ import type { AssistantMessage, Model } from "@gsd/pi-ai";
 import { isContextOverflow } from "@gsd/pi-ai";
 import {
 	type CompactionResult,
+	CompactionProducedNoSummaryError,
 	calculateContextTokens,
 	compact,
 	estimateContextTokens,
@@ -408,7 +409,13 @@ export class CompactionOrchestrator {
 				}, 100);
 			}
 		} catch (error) {
-			const errorMessage = getErrorMessage(error);
+			// Distinguish the "no usable summary" failure (issue #4665) so the UI
+			// can surface a clearer message than a generic compaction failure.
+			// Either way we drop the would-be compaction entry rather than writing
+			// an empty string to the session history.
+			const errorMessage = error instanceof CompactionProducedNoSummaryError
+				? `Compaction produced no usable summary — session history preserved as-is. (${error.message})`
+				: getErrorMessage(error);
 			this._deps.emit({
 				type: "auto_compaction_end",
 				result: undefined,
