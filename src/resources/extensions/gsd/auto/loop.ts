@@ -88,6 +88,7 @@ function saveStuckState(basePath: string, state: LoopState): void {
 // limit (--max-old-space-size or default ~1.5-4GB depending on platform).
 const MEMORY_CHECK_INTERVAL = 5; // check every 5 iterations
 const MEMORY_PRESSURE_THRESHOLD = 0.85; // 85% of heap limit
+const MAX_CUSTOM_ENGINE_VERIFY_RETRIES = 3;
 
 type DispatchContract = "legacy-direct" | "uok-scheduler";
 
@@ -437,16 +438,49 @@ export async function autoLoop(
           break;
         }
         if (verifyResult === "retry") {
-          debugLog("autoLoop", { phase: "custom-engine-verify-retry", iteration, unitId: iterData.unitId });
+          const recoveryKey = `${iterData.unitType}/${iterData.unitId}`;
+          const retryCounts = s.verificationRetryCount ?? s.unitRecoveryCount;
+          const attempts = (retryCounts.get(recoveryKey) ?? 0) + 1;
+          retryCounts.set(recoveryKey, attempts);
+          debugLog("autoLoop", { phase: "custom-engine-verify-retry", iteration, unitId: iterData.unitId, attempts });
           deps.uokObserver?.onPhaseResult("custom-engine", "retry", {
             unitType: iterData.unitType,
             unitId: iterData.unitId,
+            attempts,
           });
+          if (attempts > MAX_CUSTOM_ENGINE_VERIFY_RETRIES) {
+            const recovery = await policy.recover(iterData.unitType, iterData.unitId, { basePath: s.basePath });
+            if (recovery.outcome === "pause") {
+              await deps.pauseAuto(ctx, pi);
+              finishTurn("paused", "manual-attention", recovery.reason ?? "custom-engine-verify-retry-exhausted");
+              break;
+            }
+            if (recovery.outcome === "skip") {
+              await deps.stopAuto(
+                ctx,
+                pi,
+                recovery.reason ??
+                  `Custom workflow verification for ${iterData.unitId} requested skip after retry exhaustion, but the custom engine cannot reconcile skipped steps.`,
+              );
+              finishTurn("stopped", "manual-attention", "custom-engine-verify-retry-exhausted");
+              break;
+            }
+            const exhaustedReason =
+              `Custom workflow verification for ${iterData.unitId} requested retry ${attempts} times without passing.`;
+            await deps.stopAuto(
+              ctx,
+              pi,
+              recovery.outcome === "stop" && recovery.reason ? recovery.reason : exhaustedReason,
+            );
+            finishTurn("stopped", "manual-attention", "custom-engine-verify-retry-exhausted");
+            break;
+          }
           finishTurn("retry");
           continue;
         }
 
         // Verification passed — mark step complete
+        s.verificationRetryCount?.delete(`${iterData.unitType}/${iterData.unitId}`);
         debugLog("autoLoop", { phase: "custom-engine-reconcile", iteration, unitId: iterData.unitId });
         const reconcileResult = await engine.reconcile(engineState, {
           unitType: iterData.unitType,

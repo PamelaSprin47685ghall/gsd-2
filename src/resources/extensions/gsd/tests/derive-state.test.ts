@@ -446,9 +446,8 @@ Continue from step 2.
 
       const state2 = await deriveState(base2);
 
-      // With partial-dep fallback, S01 is picked despite unmet dep on S99
-      assert.deepStrictEqual(state2.phase, 'planning', 'blocked-B: phase is planning (fallback picks S01)');
-      assert.deepStrictEqual(state2.activeSlice?.id, 'S01', 'blocked-B: activeSlice is S01 via fallback');
+      assert.deepStrictEqual(state2.phase, 'blocked', 'blocked-B: phase is blocked when all slice deps are unmet');
+      assert.deepStrictEqual(state2.activeSlice, null, 'blocked-B: no activeSlice is selected with unmet deps');
     } finally {
       cleanup(base2);
     }

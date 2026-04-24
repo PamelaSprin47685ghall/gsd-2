@@ -616,10 +616,9 @@ describe('derive-state-db', async () => {
       invalidateStateCache();
       const dbState = await deriveStateFromDb(base);
 
-      // With partial-dep fallback, circular deps no longer block — fallback picks first eligible slice
-      assert.deepStrictEqual(dbState.phase, 'planning', 'blocked-db: phase is planning (fallback picks a slice)');
+      assert.deepStrictEqual(dbState.phase, 'blocked', 'blocked-db: phase is blocked when circular deps have no eligible slice');
       assert.deepStrictEqual(dbState.phase, fileState.phase, 'blocked-db: phase matches filesystem');
-      assert.ok(dbState.activeSlice !== null, 'blocked-db: activeSlice is set via fallback');
+      assert.deepStrictEqual(dbState.activeSlice, null, 'blocked-db: activeSlice remains unset when deps are unmet');
 
       closeDatabase();
     } finally {

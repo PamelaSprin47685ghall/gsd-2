@@ -481,6 +481,67 @@ describe("Custom engine loop integration", () => {
     );
   });
 
+  it("stops custom workflow after repeated verification retries", async () => {
+    _resetPendingResolve();
+
+    const runDir = makeTmpDir();
+    const graph = makeGraph([makeStep({ id: "retry-step" })], "retry-exhaustion");
+    writeGraph(runDir, graph);
+    writeFileSync(join(runDir, "DEFINITION.yaml"), stringify({
+      version: 1,
+      name: "retry-exhaustion",
+      steps: [{
+        id: "retry-step",
+        name: "retry-step",
+        prompt: "Do retry-step",
+        produces: "retry-step/output.md",
+        verify: { policy: "shell-command", command: "exit 1" },
+      }],
+    }));
+
+    const ctx = makeMockCtx();
+    const pi = makeMockPi();
+    const s = makeLoopSession({
+      activeEngineId: "custom",
+      activeRunDir: runDir,
+      basePath: runDir,
+    });
+    const deps = makeMockDeps({
+      stopAuto: async (_ctx, _pi, reason) => {
+        deps.callLog.push(`stopAuto:${reason ?? "no-reason"}`);
+        s.active = false;
+      },
+    });
+
+    const resolver = setInterval(() => {
+      resolveAgentEnd({ messages: [{ role: "assistant" }] });
+    }, 25);
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        autoLoop(ctx, pi, s, deps),
+        new Promise((_, reject) =>
+          timeout = setTimeout(() => {
+            s.active = false;
+            resolveAgentEnd({ messages: [{ role: "assistant" }] });
+            reject(new Error(
+              `autoLoop did not stop after verification retry exhaustion; calls=${pi.calls.length}; log=${deps.callLog.join(",")}`,
+            ));
+          }, 3_000),
+        ),
+      ]);
+    } finally {
+      clearInterval(resolver);
+      if (timeout) clearTimeout(timeout);
+    }
+
+    assert.equal(pi.calls.length, 4, "verification retry should be capped after four dispatched attempts");
+    const stopEntry = deps.callLog.find((e: string) => e.startsWith("stopAuto:"));
+    assert.match(stopEntry ?? "", /requested retry 4 times without passing/);
+    const finalGraph = readGraph(runDir);
+    assert.equal(finalGraph.steps[0]?.status, "active", "failed verification must not reconcile the step complete");
+  });
+
   it("GRAPH.yaml step stays pending when session deactivates before reconcile", async () => {
     _resetPendingResolve();
 

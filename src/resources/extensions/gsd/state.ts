@@ -139,6 +139,31 @@ export function isValidationTerminal(validationContent: string): boolean {
   return extractVerdict(validationContent) != null;
 }
 
+function isTerminalMilestoneSummaryContent(content: string): boolean {
+  const summary = parseSummary(content);
+  const rawStatus = typeof summary.frontmatter.status === 'string'
+    ? summary.frontmatter.status.trim().toLowerCase()
+    : '';
+  if (['active', 'pending', 'blocked', 'failed', 'failure', 'incomplete'].includes(rawStatus)) {
+    return false;
+  }
+
+  return !(
+    /(?:^|\n)\s*#\s*BLOCKER\b/i.test(content) ||
+    /auto-mode recovery failed/i.test(content) ||
+    /verification\s+failed/i.test(content) ||
+    /\bnot complete\b/i.test(content)
+  );
+}
+
+async function isTerminalMilestoneSummaryFile(
+  path: string,
+  loader: (path: string) => Promise<string | null>,
+): Promise<boolean> {
+  const content = await loader(path);
+  return content == null || isTerminalMilestoneSummaryContent(content);
+}
+
 // ─── State Derivation ──────────────────────────────────────────────────────
 
 // ── deriveState memoization ─────────────────────────────────────────────────
@@ -211,14 +236,14 @@ export async function getActiveMilestoneId(basePath: string): Promise<string | n
     const content = roadmapFile ? await loadFile(roadmapFile) : null;
     if (!content) {
       const summaryFile = resolveMilestoneFile(basePath, mid, "SUMMARY");
-      if (summaryFile) continue;
+      if (summaryFile && await isTerminalMilestoneSummaryFile(summaryFile, loadFile)) continue;
       if (isGhostMilestone(basePath, mid)) continue;
       return mid;
     }
     const roadmap = parseRoadmap(content);
     if (!isMilestoneComplete(roadmap)) {
       const summaryFile = resolveMilestoneFile(basePath, mid, "SUMMARY");
-      if (!summaryFile) return mid;
+      if (!summaryFile || !(await isTerminalMilestoneSummaryFile(summaryFile, loadFile))) return mid;
     }
   }
   return null;
@@ -668,37 +693,12 @@ function resolveSliceDependencies(activeMilestoneSlices: SliceRow[]): { activeSl
     }
   }
 
-  // First pass: find a slice with ALL dependencies satisfied (strict)
-  let bestFallback: SliceRow | null = null;
-  let bestFallbackSatisfied = -1;
-
   for (const s of activeMilestoneSlices) {
     if (isStatusDone(s.status)) continue;
     if (isDeferredStatus(s.status)) continue;
     if (s.depends.every(dep => doneSliceIds.has(dep))) {
       return { activeSlice: { id: s.id, title: s.title }, activeSliceRow: s };
     }
-    // Track the slice with the most satisfied dependencies as fallback
-    const satisfied = s.depends.filter(dep => doneSliceIds.has(dep)).length;
-    if (satisfied > bestFallbackSatisfied || (satisfied === bestFallbackSatisfied && !bestFallback)) {
-      bestFallback = s;
-      bestFallbackSatisfied = satisfied;
-    }
-  }
-
-  // Fallback: if no slice has all deps met but there ARE incomplete non-deferred
-  // slices, pick the one with the most deps satisfied. This prevents hard-blocking
-  // when dependency metadata is stale (e.g. after reassessment added/removed slices)
-  // or when deps reference slices from previous milestones.
-  if (bestFallback) {
-    const unmet = bestFallback.depends.filter(dep => !doneSliceIds.has(dep));
-    logWarning("state",
-      `No slice has all deps satisfied — falling back to ${bestFallback.id} ` +
-      `(${bestFallbackSatisfied}/${bestFallback.depends.length} deps met, ` +
-      `unmet: ${unmet.join(", ")})`,
-      { mid: activeMilestoneSlices[0]?.milestone_id, sid: bestFallback.id },
-    );
-    return { activeSlice: { id: bestFallback.id, title: bestFallback.title }, activeSliceRow: bestFallback };
   }
 
   return { activeSlice: null, activeSliceRow: null };
@@ -1160,7 +1160,7 @@ export async function _deriveStateImpl(basePath: string): Promise<GSDState> {
     const rc = rf ? await cachedLoadFile(rf) : null;
     if (!rc) {
       const sf = resolveMilestoneFile(basePath, mid, "SUMMARY");
-      if (sf) completeMilestoneIds.add(mid);
+      if (sf && await isTerminalMilestoneSummaryFile(sf, cachedLoadFile)) completeMilestoneIds.add(mid);
       continue;
     }
     const rmap = parseRoadmap(rc);
@@ -1169,11 +1169,11 @@ export async function _deriveStateImpl(basePath: string): Promise<GSDState> {
       // Summary is the terminal artifact — if it exists, the milestone is
       // complete even when roadmap checkboxes weren't ticked (#864).
       const sf = resolveMilestoneFile(basePath, mid, "SUMMARY");
-      if (sf) completeMilestoneIds.add(mid);
+      if (sf && await isTerminalMilestoneSummaryFile(sf, cachedLoadFile)) completeMilestoneIds.add(mid);
       continue;
     }
     const sf = resolveMilestoneFile(basePath, mid, "SUMMARY");
-    if (sf) completeMilestoneIds.add(mid);
+    if (sf && await isTerminalMilestoneSummaryFile(sf, cachedLoadFile)) completeMilestoneIds.add(mid);
   }
 
   // Phase 2: Build registry using cached roadmaps (no re-parsing or re-reading)
@@ -1201,12 +1201,14 @@ export async function _deriveStateImpl(basePath: string): Promise<GSDState> {
       const summaryFile = resolveMilestoneFile(basePath, mid, "SUMMARY");
       if (summaryFile) {
         const summaryContent = await cachedLoadFile(summaryFile);
-        const summaryTitle = summaryContent
-          ? (parseSummary(summaryContent).title || mid)
-          : mid;
-        registry.push({ id: mid, title: summaryTitle, status: 'complete' });
-        completeMilestoneIds.add(mid);
-        continue;
+        if (!summaryContent || isTerminalMilestoneSummaryContent(summaryContent)) {
+          const summaryTitle = summaryContent
+            ? (parseSummary(summaryContent).title || mid)
+            : mid;
+          registry.push({ id: mid, title: summaryTitle, status: 'complete' });
+          completeMilestoneIds.add(mid);
+          continue;
+        }
       }
       // Ghost milestone (only META.json, no CONTEXT/ROADMAP/SUMMARY) — skip entirely
       if (isGhostMilestone(basePath, mid)) continue;
@@ -1262,7 +1264,7 @@ export async function _deriveStateImpl(basePath: string): Promise<GSDState> {
       // needs-remediation is terminal but requires re-validation (#3596)
       const needsRevalidation = !validationTerminal || verdict === 'needs-remediation';
 
-      if (summaryFile) {
+      if (summaryFile && await isTerminalMilestoneSummaryFile(summaryFile, cachedLoadFile)) {
         // Summary exists → milestone is complete regardless of validation state.
         // The summary is the terminal artifact (#864).
         registry.push({ id: mid, title, status: 'complete' });
@@ -1288,7 +1290,7 @@ export async function _deriveStateImpl(basePath: string): Promise<GSDState> {
       // Roadmap slices not all checked — but if a summary exists, the milestone
       // is still complete. The summary is the terminal artifact (#864).
       const summaryFile = resolveMilestoneFile(basePath, mid, "SUMMARY");
-      if (summaryFile) {
+      if (summaryFile && await isTerminalMilestoneSummaryFile(summaryFile, cachedLoadFile)) {
         registry.push({ id: mid, title, status: 'complete' });
       } else if (!activeMilestoneFound) {
         // Check milestone-level dependencies before promoting to active.
@@ -1563,32 +1565,12 @@ export async function _deriveStateImpl(basePath: string): Promise<GSDState> {
       };
     }
   } else {
-    let bestFallbackLegacy: { id: string; title: string; depends: string[] } | null = null;
-    let bestFallbackLegacySatisfied = -1;
-
     for (const s of activeRoadmap.slices) {
       if (s.done) continue;
       if (s.depends.every(dep => doneSliceIds.has(dep))) {
         activeSlice = { id: s.id, title: s.title };
         break;
       }
-      // Track best fallback
-      const satisfied = s.depends.filter(dep => doneSliceIds.has(dep)).length;
-      if (satisfied > bestFallbackLegacySatisfied) {
-        bestFallbackLegacy = s;
-        bestFallbackLegacySatisfied = satisfied;
-      }
-    }
-
-    // Fallback: if no slice has all deps met, pick the one with the most deps satisfied
-    if (!activeSlice && bestFallbackLegacy) {
-      const unmet = bestFallbackLegacy.depends.filter(dep => !doneSliceIds.has(dep));
-      logWarning("state",
-        `No slice has all deps satisfied — falling back to ${bestFallbackLegacy.id} ` +
-        `(${bestFallbackLegacySatisfied}/${bestFallbackLegacy.depends.length} deps met, ` +
-        `unmet: ${unmet.join(", ")})`,
-      );
-      activeSlice = { id: bestFallbackLegacy.id, title: bestFallbackLegacy.title };
     }
   }
 
