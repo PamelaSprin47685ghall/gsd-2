@@ -712,6 +712,50 @@ export const executeTaskComplete = async (params, projectDir) => {
     }
   });
 
+  it("gsd_plan_milestone surfaces the full-vs-sketch conditional requirement in the tool schema", () => {
+    // Regression: the four heavy slice fields (successCriteria, proofLevel,
+    // integrationClosure, observabilityImpact) are Zod-optional so sketch
+    // slices can omit them, but they are required for every other slice. That
+    // conditional requirement is invisible in the JSON Schema `required`
+    // array — agents discovered it only by hitting a -32602 error mid-call.
+    // Each heavy field's `.describe()` now states the constraint; this test
+    // pins that so future edits can't silently strip it.
+    const server = makeMockServer();
+    registerWorkflowTools(server as any);
+    const milestoneTool = server.tools.find((t) => t.name === "gsd_plan_milestone");
+    assert.ok(milestoneTool, "milestone planning tool should be registered");
+
+    const slicesParam: any = milestoneTool!.params.slices;
+    assert.ok(slicesParam, "slices parameter must be present");
+    const element: any = slicesParam._def?.element;
+    assert.ok(element, "expected z.array element schema");
+
+    // Top-level slice description should state the conditional requirement.
+    const sliceDescription: string | undefined = element.description;
+    assert.ok(
+      sliceDescription && /isSketch/i.test(sliceDescription),
+      `slice schema should describe the isSketch conditional; got: ${sliceDescription}`,
+    );
+    for (const field of ["successCriteria", "proofLevel", "integrationClosure", "observabilityImpact"]) {
+      assert.ok(
+        sliceDescription!.includes(field),
+        `slice schema description should name ${field} as part of the full-slice contract`,
+      );
+    }
+
+    // Each heavy field should carry a field-level description that marks it
+    // REQUIRED unless isSketch=true.
+    const shape: Record<string, any> = element._def.shape;
+    assert.ok(shape, "expected to introspect slice object shape");
+    for (const field of ["successCriteria", "proofLevel", "integrationClosure", "observabilityImpact"] as const) {
+      const fieldDescription: string | undefined = shape[field]?.description;
+      assert.ok(
+        fieldDescription && /REQUIRED\s+unless\s+isSketch/i.test(fieldDescription),
+        `${field} description must state "REQUIRED unless isSketch=true"; got: ${fieldDescription}`,
+      );
+    }
+  });
+
   it("gsd_plan_milestone requires sketchScope when isSketch=true and skips heavy fields", async () => {
     const base = makeTmpBase();
     try {
