@@ -431,7 +431,7 @@ Continue from step 2.
       cleanup(base1);
     }
 
-    // Case B: S01 depends on nonexistent S99 → truly blocked
+    // Case B: S01 depends on nonexistent S99 -> fallback picks best available slice
     const base2 = createFixtureBase();
     try {
       writeRoadmap(base2, 'M001', `# M001: Test Milestone
@@ -446,8 +446,8 @@ Continue from step 2.
 
       const state2 = await deriveState(base2);
 
-      assert.deepStrictEqual(state2.phase, 'blocked', 'blocked-B: phase is blocked when all slice deps are unmet');
-      assert.deepStrictEqual(state2.activeSlice, null, 'blocked-B: no activeSlice is selected with unmet deps');
+      assert.deepStrictEqual(state2.phase, 'planning', 'blocked-B: phase is planning (fallback picks S01)');
+      assert.deepStrictEqual(state2.activeSlice?.id, 'S01', 'blocked-B: activeSlice is S01 via fallback');
     } finally {
       cleanup(base2);
     }
