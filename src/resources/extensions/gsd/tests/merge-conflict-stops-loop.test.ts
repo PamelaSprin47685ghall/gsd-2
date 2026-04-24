@@ -27,7 +27,14 @@ console.log("\n=== #2330: Merge conflict stops auto loop ===");
 const methodStart = resolverSrc.indexOf("Worktree-mode merge:");
 assertTrue(methodStart > 0, "worktree-resolver has _mergeWorktreeMode method");
 
-const methodBody = resolverSrc.slice(methodStart, methodStart + 6000);
+// Slice from the _mergeWorktreeMode docblock to the next method boundary
+// (Branch-mode merge:) so that docblock/body growth doesn't silently drop
+// the `throw err` out of the search window.
+const methodEnd = resolverSrc.indexOf("Branch-mode merge:", methodStart);
+const methodBody = resolverSrc.slice(
+  methodStart,
+  methodEnd > 0 ? methodEnd : methodStart + 8000,
+);
 const rethrowsConflict =
   methodBody.includes("MergeConflictError") &&
   methodBody.includes("throw err");

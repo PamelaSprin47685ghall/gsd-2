@@ -796,6 +796,43 @@ export async function stopAuto(
   const loadedPreferences = loadEffectiveGSDPreferences(s.basePath || undefined)?.preferences;
   const reasonSuffix = reason ? ` — ${reason}` : "";
 
+  // #4764 — telemetry: record the exit reason and whether the current milestone
+  // was merged before we entered stopAuto. This is the producer-side signal for
+  // the #4761 orphan class: milestoneMerged=false + currentMilestoneId present
+  // is exactly the pattern that strands work.
+  try {
+    const { emitAutoExit } = await import("./worktree-telemetry.js");
+    type AutoExitReason =
+      | "pause" | "stop" | "blocked" | "merge-conflict" | "merge-failed"
+      | "slice-merge-conflict" | "all-complete" | "no-active-milestone" | "other";
+    // Normalize the free-form reason to a closed set so the telemetry
+    // aggregator buckets stably. Raw detail is preserved in the phases.ts
+    // notification and the notify'd error string.
+    const rawReason = reason ?? "stop";
+    const normalizedReason: AutoExitReason = rawReason.startsWith("Blocked:")
+      ? "blocked"
+      : rawReason.startsWith("Merge conflict")
+        ? "merge-conflict"
+        : rawReason.startsWith("Merge error") || rawReason.startsWith("Merge failed")
+          ? "merge-failed"
+          : rawReason.startsWith("slice-merge-conflict")
+            ? "slice-merge-conflict"
+            : rawReason === "All milestones complete"
+              ? "all-complete"
+              : rawReason === "No active milestone"
+                ? "no-active-milestone"
+                : rawReason === "stop" || rawReason === "pause"
+                  ? rawReason
+                  : "other";
+    emitAutoExit(s.originalBasePath || s.basePath, {
+      reason: normalizedReason,
+      milestoneId: s.currentMilestoneId ?? undefined,
+      milestoneMerged: s.milestoneMergedInPhases === true,
+    });
+  } catch (err) {
+    logWarning("engine", `auto-exit telemetry failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   try {
     // ── Step 1: Timers and locks ──
     try {
