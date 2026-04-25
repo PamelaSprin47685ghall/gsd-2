@@ -2946,6 +2946,9 @@ export function insertAssessment(entry: {
   fullContent: string;
 }): void {
   if (!currentDb) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
+  // Idempotent: PRIMARY KEY is `path`, which is deterministic given (milestone_id, scope) per
+  // the artifact-path resolver. Retrying the same reassess-roadmap silently overwrites the row
+  // instead of accumulating duplicates.
   currentDb.prepare(
     `INSERT OR REPLACE INTO assessments (path, milestone_id, slice_id, task_id, status, scope, full_content, created_at)
      VALUES (:path, :milestone_id, :slice_id, :task_id, :status, :scope, :full_content, :created_at)`,
