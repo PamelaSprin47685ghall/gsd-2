@@ -55,38 +55,6 @@ const PROVIDER_EQ_RE = new RegExp(
 // path plus a one-line justification. Update ADR-012's "When `provider`
 // comparison is still correct" section when adding to this list.
 const ALLOWED_FILES: Record<string, string> = {
-  // Fallback source is the plain `anthropic` transport (routes to claude-code).
-  "packages/pi-coding-agent/src/core/retry-handler.ts":
-    "transport-specific fallback source (ADR-012)",
-
-  // Claude-Code-specific SDK hooks (OAuth prep, streaming buffer sizing).
-  "packages/pi-coding-agent/src/core/sdk.ts":
-    "claude-code-specific SDK behavior",
-  "packages/pi-coding-agent/src/modes/interactive/controllers/chat-controller.ts":
-    "claude-code-specific streaming UI",
-  "packages/pi-coding-agent/src/modes/interactive/components/assistant-message.ts":
-    "claude-code-specific message rendering",
-
-  // GitHub Copilot transport-specific request/auth transforms.
-  "packages/pi-ai/src/utils/oauth/github-copilot.ts":
-    "github-copilot OAuth-specific model shaping",
-  "packages/pi-ai/src/providers/openai-shared.ts":
-    "github-copilot-specific header injection",
-  "packages/pi-ai/src/providers/anthropic.ts":
-    "github-copilot-specific header injection on Anthropic transport",
-
-  // Transport-specific model-ID quirks (OpenRouter Anthropic IDs, OpenAI
-  // custom-model-ID length cap, Copilot-specific headers).
-  "packages/pi-ai/src/providers/openai-completions.ts":
-    "transport-specific model-ID and header handling",
-
-  // Model-registry canonical-provider tiebreakers (prefer plain `anthropic` /
-  // `claude-code` when multiple transports serve the same model).
-  "src/resources/extensions/gsd/auto-model-selection.ts":
-    "canonical-provider tiebreakers (ADR-012)",
-  "src/provider-migrations.ts":
-    "transport-specific default-provider migration target (ADR-012)",
-
 };
 
 function shouldScan(path: string): boolean {
