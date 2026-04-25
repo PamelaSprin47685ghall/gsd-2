@@ -2092,7 +2092,7 @@ export function mergeMilestoneToMain(
         }
       }
 
-      if (nonGsdUU.length === 0) {
+      if (gsdUU.length > 0 && nonGsdUU.length === 0) {
         // All conflicts were .gsd/ files — safe to drop the stash
         if (stashRefForDrop) {
           try {
@@ -2107,11 +2107,16 @@ export function mergeMilestoneToMain(
         } else {
           logWarning("worktree", "recorded stash entry could not be resolved; skipping automatic drop");
         }
-      } else {
+      } else if (nonGsdUU.length > 0) {
         // Non-.gsd conflicts remain — leave stash for manual resolution
         logWarning("reconcile", "Stash pop conflict on non-.gsd files after merge", {
           files: nonGsdUU.join(", "),
         });
+      } else {
+        logWarning(
+          "worktree",
+          "git stash pop failed without resolvable conflict files; leaving stash for manual recovery",
+        );
       }
     }
   }

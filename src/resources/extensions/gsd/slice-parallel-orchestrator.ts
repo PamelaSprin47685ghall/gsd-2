@@ -13,7 +13,8 @@
  * - Conflict check: file overlap between slice plans (slice-parallel-conflict.ts)
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
   existsSync,
@@ -42,6 +43,8 @@ export interface SliceWorkerInfo {
   milestoneId: string;
   sliceId: string;
   pid: number;
+  workerToken: string;
+  processStartFingerprint: string | null;
   process: ChildProcess | null;
   worktreePath: string;
   startedAt: number;
@@ -84,6 +87,8 @@ interface PersistedSliceWorker {
   milestoneId: string;
   sliceId: string;
   pid: number;
+  workerToken?: string;
+  processStartFingerprint?: string | null;
   worktreePath: string;
   startedAt: number;
   state: "running" | "stopped" | "error";
@@ -105,7 +110,7 @@ function sliceStateFilePath(basePath: string): string {
   return join(gsdRoot(basePath), SLICE_ORCHESTRATOR_STATE_FILE);
 }
 
-function isSlicePidAlive(pid: number): boolean {
+function isPidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
@@ -114,6 +119,74 @@ function isSlicePidAlive(pid: number): boolean {
     if ((err as NodeJS.ErrnoException).code === "EPERM") return true;
     return false;
   }
+}
+
+function readLinuxProcessStartFingerprint(pid: number): string | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    const afterCommand = stat.slice(stat.lastIndexOf(")") + 2).trim();
+    const fields = afterCommand.split(/\s+/);
+    const startTimeTicks = fields[19];
+    return startTimeTicks ? `linux-stat:${startTimeTicks}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function readPsProcessStartFingerprint(pid: number): string | null {
+  try {
+    const raw = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf-8",
+    }).trim().replace(/\s+/g, " ");
+    return raw ? `ps-lstart:${raw}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function readProcessStartFingerprint(pid: number): string | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  return readLinuxProcessStartFingerprint(pid) ?? readPsProcessStartFingerprint(pid);
+}
+
+function linuxProcessEnvContains(pid: number, key: string, value: string): boolean | null {
+  if (process.platform !== "linux") return null;
+  try {
+    const env = readFileSync(`/proc/${pid}/environ`, "utf-8");
+    return env.split("\0").includes(`${key}=${value}`);
+  } catch {
+    return null;
+  }
+}
+
+function createWorkerToken(milestoneId: string, sliceId: string): string {
+  return `slice:${milestoneId}:${sliceId}:${Date.now()}:${randomUUID()}`;
+}
+
+function isRecoveredSliceWorkerAlive(worker: {
+  pid: number;
+  workerToken?: string;
+  processStartFingerprint?: string | null;
+}): boolean {
+  if (!isPidAlive(worker.pid)) return false;
+  if (!worker.processStartFingerprint) return false;
+
+  const currentFingerprint = readProcessStartFingerprint(worker.pid);
+  if (!currentFingerprint || currentFingerprint !== worker.processStartFingerprint) {
+    return false;
+  }
+
+  if (worker.workerToken) {
+    const envMatches = linuxProcessEnvContains(
+      worker.pid,
+      "GSD_SLICE_WORKER_TOKEN",
+      worker.workerToken,
+    );
+    if (envMatches === false) return false;
+  }
+
+  return true;
 }
 
 /**
@@ -132,6 +205,8 @@ function persistSliceState(): void {
         milestoneId: w.milestoneId,
         sliceId: w.sliceId,
         pid: w.pid,
+        workerToken: w.workerToken,
+        processStartFingerprint: w.processStartFingerprint,
         worktreePath: w.worktreePath,
         startedAt: w.startedAt,
         state: w.state,
@@ -195,7 +270,7 @@ export function restoreSliceState(basePath: string): PersistedSliceState | null 
     const survivors: PersistedSliceWorker[] = [];
     const dead: PersistedSliceWorker[] = [];
     for (const w of persisted.workers) {
-      if (isSlicePidAlive(w.pid)) {
+      if (w.state === "running" && isRecoveredSliceWorkerAlive(w)) {
         survivors.push(w);
       } else if (w.state === "running") {
         dead.push(w);
@@ -260,6 +335,8 @@ export function isSliceParallelActive(basePath?: string): boolean {
       pid: w.pid,
       process: null,
       worktreePath: w.worktreePath,
+      workerToken: w.workerToken ?? "",
+      processStartFingerprint: w.processStartFingerprint ?? null,
       startedAt: w.startedAt,
       state: w.state,
       completedUnits: w.completedUnits,
@@ -337,6 +414,8 @@ export async function startSliceParallel(
         milestoneId,
         sliceId: slice.id,
         pid: 0,
+        workerToken: createWorkerToken(milestoneId, slice.id),
+        processStartFingerprint: null,
         process: null,
         worktreePath: wtPath,
         startedAt: Date.now(),
@@ -353,12 +432,16 @@ export async function startSliceParallel(
         started.push(slice.id);
       } else {
         errors.push({ sid: slice.id, error: "Failed to spawn worker process" });
-        worker.state = "error";
+        sliceState.workers.delete(slice.id);
+        try {
+          removeWorktree(basePath, wtName, { deleteBranch: true, force: true });
+        } catch { /* ignore cleanup failures */ }
       }
     } catch (err) {
       errors.push({ sid: slice.id, error: getErrorMessage(err) });
       // Best-effort cleanup of partially created worktree
       const wtName = `${milestoneId}-${slice.id}`;
+      sliceState.workers.delete(slice.id);
       try {
         removeWorktree(basePath, wtName, { deleteBranch: true, force: true });
       } catch { /* ignore cleanup failures */ }
@@ -388,7 +471,7 @@ export function stopSliceParallel(): void {
     try {
       if (worker.process) {
         worker.process.kill("SIGTERM");
-      } else if (isSlicePidAlive(worker.pid)) {
+      } else if (worker.state === "running" && isRecoveredSliceWorkerAlive(worker)) {
         process.kill(worker.pid, "SIGTERM");
       }
     } catch { /* already dead */ }
@@ -541,6 +624,7 @@ function spawnSliceWorker(
         GSD_MILESTONE_LOCK: milestoneId,
         GSD_PROJECT_ROOT: basePath,
         GSD_PARALLEL_WORKER: "1",
+        GSD_SLICE_WORKER_TOKEN: worker.workerToken,
       },
       stdio: ["ignore", "pipe", "pipe"],
       detached: false,
@@ -559,9 +643,15 @@ function spawnSliceWorker(
 
   worker.process = child;
   worker.pid = child.pid ?? 0;
+  worker.processStartFingerprint = worker.pid > 0
+    ? readProcessStartFingerprint(worker.pid)
+    : null;
 
   if (!child.pid) {
     worker.process = null;
+    worker.pid = 0;
+    worker.processStartFingerprint = null;
+    try { child.kill("SIGTERM"); } catch { /* best-effort */ }
     return false;
   }
 

@@ -194,4 +194,20 @@ describe("Windows pre-merge DB release (#4704)", () => {
     assert.ok(!src.includes('["stash", "pop"]'), "stash pop is never unqualified");
     assert.ok(!src.includes('["stash", "drop"]'), "stash drop is never unqualified");
   });
+
+  it("stash drop after pop failure requires auto-resolved .gsd conflicts", () => {
+    const src = readFileSync(
+      join(import.meta.dirname, "..", "auto-worktree.ts"),
+      "utf-8",
+    );
+
+    assert.ok(
+      src.includes("gsdUU.length > 0 && nonGsdUU.length === 0"),
+      "stash drop must only run after detected .gsd conflicts were auto-resolved",
+    );
+    assert.ok(
+      src.includes("git stash pop failed without resolvable conflict files; leaving stash for manual recovery"),
+      "non-conflict stash pop failures must leave the stash for manual recovery",
+    );
+  });
 });
