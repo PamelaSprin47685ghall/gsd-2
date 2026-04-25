@@ -381,14 +381,20 @@ export const DISPATCH_RULES: DispatchRule[] = [
       // Only applies when UAT dispatch is enabled
       if (!prefs?.uat_dispatch) return null;
 
-      // DB-first: get closed slices from DB
+      // DB-first: prefer closed slices from DB; fall back to ROADMAP on disk.
       let closedSliceIds: string[];
       if (isDbAvailable()) {
         closedSliceIds = getMilestoneSlices(mid)
           .filter(s => isClosedStatus(s.status))
           .map(s => s.id);
       } else {
-        return null;
+        // Filesystem fallback for degraded / unmigrated projects.
+        // `slice.done` in the parsed ROADMAP is the disk-level closed signal.
+        const roadmapFile = resolveMilestoneFile(basePath, mid, "ROADMAP");
+        const roadmapContent = roadmapFile ? await loadFile(roadmapFile) : null;
+        if (!roadmapContent) return null;
+        const roadmap = parseRoadmap(roadmapContent);
+        closedSliceIds = roadmap.slices.filter(s => s.done).map(s => s.id);
       }
 
       for (const sliceId of closedSliceIds) {

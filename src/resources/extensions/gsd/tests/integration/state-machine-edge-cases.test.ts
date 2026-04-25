@@ -912,6 +912,62 @@ describe("dispatch failure modes", () => {
     );
   });
 
+  test("UAT verdict gate: ROADMAP fallback gates done slices when DB is unavailable", async () => {
+    base = createFullFixture();
+    const mDir = join(base, ".gsd", "milestones", "M001");
+    writeFileSync(
+      join(mDir, "M001-ROADMAP.md"),
+      [
+        "# M001: Edge Case Milestone",
+        "",
+        "## Vision",
+        "Prove edge case correctness.",
+        "",
+        "## Success Criteria",
+        "- All edge cases handled",
+        "",
+        "## Slices",
+        "",
+        "- [x] **S01: First Feature** `risk:low` `depends:[]`",
+        "  - After this: First feature proven.",
+        "",
+        "- [ ] **S02: Second Feature** `risk:low` `depends:[]`",
+        "  - After this: Second feature proven.",
+        "",
+        "## Boundary Map",
+        "",
+        "| From | To | Produces | Consumes |",
+        "|------|----|----------|----------|",
+        "| S01 | terminal | feature-a | nothing |",
+        "| S02 | terminal | feature-b | nothing |",
+      ].join("\n"),
+    );
+
+    const s01Dir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
+    writeFileSync(
+      join(s01Dir, "S01-UAT.md"),
+      "# UAT File\n\n## UAT Type\n\n- UAT mode: artifact-driven\n",
+    );
+    writeFileSync(
+      join(s01Dir, "S01-ASSESSMENT.md"),
+      "---\nverdict: needs-remediation\n---\n# UAT Assessment\n",
+    );
+
+    const ctx = buildDispatchCtx(base, "M001", {
+      phase: "planning",
+      activeSlice: { id: "S02", title: "Second" },
+      activeTask: null,
+    });
+    ctx.prefs = { uat_dispatch: true } as any;
+
+    const result = await getUatVerdictGate().match(ctx);
+    assert.equal(result?.action, "stop", "ROADMAP done slices should be gated without DB");
+    assert.ok(
+      (result as any).reason?.includes('UAT verdict for S01 is "needs-remediation"'),
+      "stop reason should report normalized ASSESSMENT verdict from disk fallback",
+    );
+  });
+
   for (const status of ["done", "skipped"]) {
     test(`UAT verdict gate: legacy closed status "${status}" is gated`, async () => {
       base = createFullFixture();
