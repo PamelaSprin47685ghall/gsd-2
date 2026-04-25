@@ -36,7 +36,7 @@ Identify what the extension needs from the user's description:
 
 **Directory with index.ts** — the standard pattern for all extensions:
 ```
-~/.gsd/agent/extensions/my-extension/
+~/.pi/agent/extensions/my-extension/
 ├── extension-manifest.json   # Required — declares capabilities
 ├── index.ts                  # Entry point (must export default function)
 ├── tools.ts                  # Optional — tool implementations
@@ -45,7 +45,7 @@ Identify what the extension needs from the user's description:
 
 **Package with dependencies** — when npm packages are needed:
 ```
-~/.gsd/agent/extensions/my-extension/
+~/.pi/agent/extensions/my-extension/
 ├── extension-manifest.json
 ├── package.json
 ├── src/index.ts
