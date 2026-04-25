@@ -3103,7 +3103,7 @@ function rowToGate(row: Record<string, unknown>): GateRow {
     scope: row["scope"] as GateScope,
     task_id: (row["task_id"] as string) ?? "",
     status: row["status"] as GateStatus,
-    verdict: (row["verdict"] as GateVerdict) || "",
+    verdict: row["status"] === "pending" ? null : (row["verdict"] as GateVerdict),
     rationale: (row["rationale"] as string) || "",
     findings: (row["findings"] as string) || "",
     evaluated_at: (row["evaluated_at"] as string) ?? null,
@@ -3207,7 +3207,7 @@ export function getGateResults(milestoneId: string, sliceId: string, scope?: Gat
 export function markAllGatesOmitted(milestoneId: string, sliceId: string): void {
   if (!currentDb) return;
   currentDb.prepare(
-    `UPDATE quality_gates SET status = 'omitted', verdict = 'omitted', evaluated_at = :now
+    `UPDATE quality_gates SET status = 'complete', verdict = 'omitted', evaluated_at = :now
      WHERE milestone_id = :mid AND slice_id = :sid AND status = 'pending'`,
   ).run({
     ":mid": milestoneId,
