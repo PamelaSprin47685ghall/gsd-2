@@ -68,6 +68,12 @@ Fire-and-forget thought capture. Captures are triaged automatically between task
 
 Every task gets a clean AI context window. No accumulated garbage, no quality degradation from context bloat. The dispatch prompt includes everything needed — task plans, prior summaries, decisions, dependency context — so the AI starts oriented.
 
+## Runtime Tool Policy
+
+Every auto-mode unit declares a `ToolsPolicy` in its `UnitContextManifest`, and GSD enforces it before tool calls run. Execution units use `all` mode and can edit project files, run shell commands, and dispatch subagents. Planning and discussion units use `planning` mode: read tools are allowed, writes are limited to `.gsd/`, bash must be read-only, and subagent dispatch is blocked. Documentation units use `docs` mode, which also allows writes to the manifest's documentation globs such as `docs/**`, top-level `README*.md`, `CHANGELOG.md`, and top-level `*.md`.
+
+Policy violations return a hard block, so unsafe writes, unsafe bash, and subagent dispatch are stopped at runtime rather than handled as model instructions.
+
 ## Git Isolation
 
 GSD isolates milestone work using one of three modes:
@@ -175,9 +181,25 @@ After a milestone completes, GSD generates a self-contained HTML report in `.gsd
 If auto mode has issues, GSD provides two diagnostic tools:
 
 - **`/gsd doctor`** — validates `.gsd/` integrity, checks referential consistency, fixes structural issues
-- **`/gsd forensics`** — full post-mortem debugger with anomaly detection, unit traces, metrics analysis, and AI-guided investigation
+- **`/gsd forensics`** — full post-mortem debugger with anomaly detection, unit traces, metrics analysis, worktree lifecycle telemetry, and AI-guided investigation
 
 ```
 /gsd doctor
 /gsd forensics [optional problem description]
 ```
+
+### Worktree Telemetry in Forensics Reports
+
+`/gsd forensics` includes a **Worktree Telemetry** section that summarizes the auto-mode worktree lifecycle across recorded sessions:
+
+- **Created / Merged / Conflicts** — counts of worktree creation and merge-back events, plus merge-conflict occurrences.
+- **Orphans detected** — milestones whose branch or worktree directory was stranded (e.g. after an interrupted session). Broken out by reason (in-progress-unmerged, complete-unmerged).
+- **Unmerged exits** — auto-mode sessions that exited (pause, stop, blocked, crash) without merging the active milestone. This is the producer-side signal for orphaned work; a non-zero count here points at sessions that should have merged but didn't.
+- **Merge duration p50 / p95** — how long `mergeMilestoneToMain` takes in practice. Useful when evaluating whether `collapse_cadence: "slice"` would help (long milestone merges often indicate large divergence that slice cadence would amortize).
+- **Canonical-root redirects** — how often validation correctly routed to a worktree instead of stale project-root state.
+
+Two anomaly types surface from telemetry:
+- `worktree-orphan` — one per orphan reason-bucket
+- `worktree-unmerged-exit` — aggregate signal across the window
+
+For per-event detail (specific milestone IDs, timestamps, exit reasons) inspect `.gsd/journal/*.jsonl` directly.

@@ -246,6 +246,71 @@ test("mixed valid/invalid/unknown keys handled correctly", () => {
   assert.equal(preferences.budget_ceiling, undefined);
 });
 
+test("disabled_model_providers validates and normalizes string arrays", () => {
+  const { preferences, errors } = validatePreferences({
+    disabled_model_providers: ["google-gemini-cli", "  google-gemini-cli  ", "openai-codex", "   "],
+  });
+  assert.equal(errors.length, 0);
+  assert.deepEqual(preferences.disabled_model_providers, ["google-gemini-cli", "openai-codex"]);
+});
+
+test("disabled_model_providers rejects non-array values", () => {
+  const { errors } = validatePreferences({ disabled_model_providers: "google-gemini-cli" as any });
+  assert.ok(errors.some((e) => e.includes("disabled_model_providers must be an array of strings")));
+});
+
+test("loadEffectiveGSDPreferences preserves disabled_model_providers across merge layers", () => {
+  const originalCwd = process.cwd();
+  const originalGsdHome = process.env.GSD_HOME;
+  const tempProject = mkdtempSync(join(tmpdir(), "gsd-disabled-provider-project-"));
+  const tempGsdHome = mkdtempSync(join(tmpdir(), "gsd-disabled-provider-home-"));
+
+  try {
+    mkdirSync(join(tempProject, ".gsd"), { recursive: true });
+
+    writeFileSync(
+      join(tempGsdHome, "PREFERENCES.md"),
+      [
+        "---",
+        "version: 1",
+        "disabled_model_providers:",
+        "  - google-gemini-cli",
+        "---",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    writeFileSync(
+      join(tempProject, ".gsd", "PREFERENCES.md"),
+      [
+        "---",
+        "version: 1",
+        "disabled_model_providers:",
+        "  - openai-codex",
+        "  - google-gemini-cli",
+        "---",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    process.env.GSD_HOME = tempGsdHome;
+    process.chdir(tempProject);
+
+    const loaded = loadEffectiveGSDPreferences();
+    assert.notEqual(loaded, null);
+    assert.deepEqual(
+      loaded!.preferences.disabled_model_providers,
+      ["google-gemini-cli", "openai-codex"],
+    );
+  } finally {
+    process.chdir(originalCwd);
+    if (originalGsdHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = originalGsdHome;
+    rmSync(tempProject, { recursive: true, force: true });
+    rmSync(tempGsdHome, { recursive: true, force: true });
+  }
+});
+
 // ── Wizard fields ────────────────────────────────────────────────────────────
 
 test("budget fields validate correctly", () => {

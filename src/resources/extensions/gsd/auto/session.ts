@@ -75,9 +75,7 @@ export interface PreExecFailure {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-export const MAX_UNIT_DISPATCHES = 3;
 export const STUB_RECOVERY_THRESHOLD = 2;
-export const MAX_LIFETIME_DISPATCHES = 6;
 export const NEW_SESSION_TIMEOUT_MS = 120_000;
 
 // ─── AutoSession ─────────────────────────────────────────────────────────────
@@ -177,6 +175,12 @@ export class AutoSession {
   /** Set to true after phases.ts successfully calls mergeAndExit, so that
    *  stopAuto does not attempt the same merge a second time (#2645). */
   milestoneMergedInPhases = false;
+
+  // #4765 — slice-cadence collapse: main-branch SHAs at the moment each
+  // milestone's first slice merge began. Used by resquashMilestoneOnMain at
+  // milestone completion to collapse N slice commits into one. Cleared when
+  // the milestone finishes (or resquash runs).
+  milestoneStartShas: Map<string, string> = new Map();
 
   // ── Dispatch circuit breakers ──────────────────────────────────────
   rewriteAttemptCount = 0;
@@ -299,6 +303,7 @@ export class AutoSession {
     this.lastGitActionStatus = null;
     this.isolationDegraded = false;
     this.milestoneMergedInPhases = false;
+    this.milestoneStartShas = new Map();
     this.checkpointSha = null;
 
     // Signal handler

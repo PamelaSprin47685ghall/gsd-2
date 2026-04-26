@@ -20,10 +20,13 @@ import { migratePiCredentials } from './pi-migration.js'
 import { shouldRunOnboarding, runOnboarding } from './onboarding.js'
 import chalk from 'chalk'
 import { checkForUpdates } from './update-check.js'
+import { shouldBypassManagedResourceMismatchGate } from './cli-policy.js'
 import { printHelp, printSubcommandHelp } from './help-text.js'
 import { applySecurityOverrides } from './security-overrides.js'
 import { validateConfiguredModel } from './startup-model-validation.js'
+import { migrateAnthropicDefaultToClaudeCode } from './provider-migrations.js'
 import {
+  buildHeadlessAutoArgs,
   parseCliArgs,
   runWebCliBranch,
   migrateLegacyFlatSessions,
@@ -177,8 +180,12 @@ function ensureRtkBootstrap(): Promise<void> {
   return (rtkBootstrapPromise ??= doRtkBootstrap())
 }
 
-// `gsd update` — update to the latest version via npm
-if (cliFlags.messages[0] === 'update') {
+// `gsd update` — update to the latest version via npm.
+// MUST run before exitIfManagedResourcesAreNewer(): when the bundled resource
+// manifest is from a newer version than the running binary, every other
+// command is blocked — only `update` should bypass the gate so the user can
+// actually upgrade out of the broken state. See shouldBypassManagedResourceMismatchGate.
+if (shouldBypassManagedResourceMismatchGate(cliFlags.messages[0])) {
   const { runUpdate } = await import('./update-cmd.js')
   await runUpdate()
   process.exit(0)
@@ -409,11 +416,19 @@ async function runHeadlessFromAuto(headlessArgs: string[]): Promise<never> {
   process.exit(0)
 }
 
+function flushPendingProviderRegistrations(resourceLoader: DefaultResourceLoader, modelRegistry: ModelRegistry): void {
+  const { runtime } = resourceLoader.getExtensions()
+  for (const { name, config } of runtime.pendingProviderRegistrations) {
+    modelRegistry.registerProvider(name, config)
+  }
+  runtime.pendingProviderRegistrations = []
+}
+
 // `gsd auto [args...]` — shorthand for `gsd headless auto [args...]` (#2732)
 // Without this, `gsd auto` falls through to the interactive TUI which hangs
 // when stdin/stdout are piped (non-TTY environments).
 if (cliFlags.messages[0] === 'auto') {
-  await runHeadlessFromAuto(cliFlags.messages)
+  await runHeadlessFromAuto(buildHeadlessAutoArgs(cliFlags))
 }
 
 // Pi's tool bootstrap can mis-detect already-installed fd/rg on some systems
@@ -563,6 +578,13 @@ if (isPrintMode) {
   })
   await resourceLoader.reload()
   markStartup('resourceLoader.reload')
+  flushPendingProviderRegistrations(resourceLoader, modelRegistry)
+  migrateAnthropicDefaultToClaudeCode({
+    authStorage,
+    isClaudeCodeReady: modelRegistry.isProviderRequestReady('claude-code'),
+    settingsManager,
+    modelRegistry,
+  })
 
   const { session, extensionsResult, modelFallbackMessage } = await createAgentSession({
     authStorage,
@@ -719,6 +741,13 @@ const resourceLoadPromise = resourceLoader.reload()
 // Then await the resource promise before creating the agent session.
 await resourceLoadPromise
 markStartup('resourceLoader.reload')
+flushPendingProviderRegistrations(resourceLoader, modelRegistry)
+migrateAnthropicDefaultToClaudeCode({
+  authStorage,
+  isClaudeCodeReady: modelRegistry.isProviderRequestReady('claude-code'),
+  settingsManager,
+  modelRegistry,
+})
 
 const { session, extensionsResult, modelFallbackMessage: interactiveFallbackMsg } = await createAgentSession({
   authStorage,

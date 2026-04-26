@@ -10,7 +10,8 @@ import { getEcosystemReadyPromise } from "../ecosystem/loader.js";
 import { buildMilestoneFileName, resolveMilestonePath, resolveSliceFile, resolveSlicePath } from "../paths.js";
 import { buildBeforeAgentStartResult } from "./system-context.js";
 import { handleAgentEnd } from "./agent-end-recovery.js";
-import { clearDiscussionFlowState, isDepthConfirmationAnswer, isQueuePhaseActive, markDepthVerified, resetWriteGateState, shouldBlockContextWrite, shouldBlockQueueExecution, isGateQuestionId, setPendingGate, clearPendingGate, getPendingGate, shouldBlockPendingGate, shouldBlockPendingGateBash, extractDepthVerificationMilestoneId } from "./write-gate.js";
+import { clearDiscussionFlowState, isDepthConfirmationAnswer, isQueuePhaseActive, markDepthVerified, resetWriteGateState, shouldBlockContextWrite, shouldBlockPlanningUnit, shouldBlockQueueExecution, isGateQuestionId, setPendingGate, clearPendingGate, getPendingGate, shouldBlockPendingGate, shouldBlockPendingGateBash, extractDepthVerificationMilestoneId } from "./write-gate.js";
+import { resolveManifest } from "../unit-context-manifest.js";
 import { isBlockedStateFile, isBashWriteToStateFile, BLOCKED_WRITE_ERROR } from "../write-intercept.js";
 import { cleanupQuickBranch } from "../quick.js";
 import { getDiscussionMilestoneId } from "../guided-flow.js";
@@ -41,6 +42,15 @@ async function syncServiceTierStatus(ctx: ExtensionContext): Promise<void> {
   ctx.ui.setStatus("gsd-fast", formatServiceTierFooterStatus(getEffectiveServiceTier(), ctx.model?.id));
 }
 
+async function applyDisabledModelProviderPolicy(ctx: ExtensionContext): Promise<void> {
+  try {
+    const { resolveDisabledModelProvidersFromPreferences } = await import("../preferences.js");
+    ctx.modelRegistry.setDisabledModelProviders(resolveDisabledModelProvidersFromPreferences());
+  } catch {
+    // Non-fatal: keep default provider visibility if preferences cannot be loaded.
+  }
+}
+
 export function registerHooks(
   pi: ExtensionAPI,
   ecosystemHandlers: GSDEcosystemBeforeAgentStartHandler[],
@@ -56,6 +66,7 @@ export function registerHooks(
     resetToolCallLoopGuard();
     resetAskUserQuestionsCache();
     await syncServiceTierStatus(ctx);
+    await applyDisabledModelProviderPolicy(ctx);
     // Skip MCP auto-prep when running inside an auto-worktree (see session_switch below).
     const { isInAutoWorktree } = await import("../auto-worktree.js");
     if (!isInAutoWorktree(process.cwd())) {
@@ -105,6 +116,7 @@ export function registerHooks(
     resetAskUserQuestionsCache();
     clearDiscussionFlowState();
     await syncServiceTierStatus(ctx);
+    await applyDisabledModelProviderPolicy(ctx);
     // Skip MCP auto-prep when running inside an auto-worktree. The worktree
     // already has .mcp.json from createAutoWorktree, and re-running the writer
     // post-chdir rewrites the file mid-run (non-idempotent due to cwd-relative
@@ -195,7 +207,7 @@ export function registerHooks(
     const { ensureDbOpen } = await import("./dynamic-tools.js");
     await ensureDbOpen();
     const state = await deriveState(basePath);
-    if (!state.activeMilestone || !state.activeSlice || !state.activeTask) return;
+    if (!state.activeMilestone || !state.activeSlice) return;
     // Write checkpoint for ALL phases, not just "executing" — discuss, research,
     // and planning also carry in-memory state (user answers, gate verification)
     // that would be lost on compaction (#4258).
@@ -210,21 +222,31 @@ export function registerHooks(
     if (await loadFile(legacyContinue)) return;
 
     const continuePath = join(sliceDir, `${state.activeSlice.id}-CONTINUE.md`);
+    const taskId = state.activeTask?.id ?? "none";
+    const taskTitle = state.activeTask?.title ?? "";
+    const phaseLabel = state.phase.replace(/-/g, " ");
+
     await saveFile(continuePath, formatContinue({
       frontmatter: {
         milestone: state.activeMilestone.id,
         slice: state.activeSlice.id,
-        task: state.activeTask.id,
+        task: taskId,
         step: 0,
         totalSteps: 0,
         status: "compacted" as const,
         savedAt: new Date().toISOString(),
       },
-      completedWork: `Task ${state.activeTask.id} (${state.activeTask.title}) was in progress when compaction occurred.`,
-      remainingWork: "Check the task plan for remaining steps.",
+      completedWork: state.activeTask
+        ? `Task ${taskId} (${taskTitle}) was in progress when compaction occurred.`
+        : `Slice ${state.activeSlice.id} was in ${phaseLabel} phase when compaction occurred.`,
+      remainingWork: state.activeTask
+        ? "Check the task plan for remaining steps."
+        : "Continue this slice from the latest planning/research/discussion artifacts.",
       decisions: "Check task summary files for prior decisions.",
       context: "Session was auto-compacted by Pi. Resume with /gsd.",
-      nextAction: `Resume task ${state.activeTask.id}: ${state.activeTask.title}.`,
+      nextAction: state.activeTask
+        ? `Resume task ${taskId}: ${taskTitle}.`
+        : `Resume ${phaseLabel} work for slice ${state.activeSlice.id}.`,
     }));
   });
 
@@ -337,6 +359,36 @@ export function registerHooks(
       if (queueGuard.block) return queueGuard;
     }
 
+    // ── Planning-unit tools-policy enforcement (#4934): runtime half ─────
+    // The active auto-mode unit's manifest declares a ToolsPolicy. For
+    // planning/docs/read-only modes, deny writes outside .gsd/ (or the
+    // manifest's allowedPathGlobs), bash that isn't read-only, and
+    // subagent dispatch. Closes the b23 bug class where a discuss-milestone
+    // turn used the host Edit tool to modify user source files.
+    const dash = getAutoDashboardData();
+    const activeUnitType = dash.currentUnit?.type;
+    if (activeUnitType) {
+      const manifest = resolveManifest(activeUnitType);
+      if (manifest) {
+        let planningInput = "";
+        if (isToolCallEventType("write", event)) {
+          planningInput = event.input.path;
+        } else if (isToolCallEventType("edit", event)) {
+          planningInput = event.input.path;
+        } else if (isToolCallEventType("bash", event)) {
+          planningInput = event.input.command;
+        }
+        const planningGuard = shouldBlockPlanningUnit(
+          event.toolName,
+          planningInput,
+          dash.basePath || discussionBasePath,
+          activeUnitType,
+          manifest.tools,
+        );
+        if (planningGuard.block) return planningGuard;
+      }
+    }
+
     // ── Single-writer engine: block direct writes to STATE.md ──────────
     // Covers write, edit, and bash tools to prevent bypass vectors.
     if (isToolCallEventType("write", event)) {
@@ -393,7 +445,7 @@ export function registerHooks(
     if (isAutoActive() && typeof event.toolCallId === "string") {
       markToolEnd(event.toolCallId);
     }
-    if (isAutoActive() && event.isError && event.toolName.startsWith("gsd_")) {
+    if (isAutoActive() && event.isError) {
       const resultPayload = ("result" in event ? event.result : undefined) as any;
       const errorText = typeof resultPayload === "string"
         ? resultPayload
@@ -402,6 +454,8 @@ export function registerHooks(
             : (typeof (event as any).content === "string"
                 ? (event as any).content
                 : String(resultPayload ?? "")));
+      // Let recordToolInvocationError classify the failure so non-gsd_ harness
+      // errors and deterministic policy rejections are handled consistently.
       recordToolInvocationError(event.toolName, errorText);
     }
     if (event.toolName !== "ask_user_questions") return;
@@ -489,12 +543,14 @@ export function registerHooks(
 
   pi.on("tool_execution_end", async (event) => {
     markToolEnd(event.toolCallId);
-    // #2883: Capture tool invocation errors (malformed/truncated JSON arguments)
+    // #2883/#4974: Capture deterministic invocation/policy errors
     // so postUnitPreVerification can break the retry loop instead of re-dispatching.
-    if (event.isError && event.toolName.startsWith("gsd_")) {
+    if (event.isError) {
       const errorText = typeof event.result === "string"
         ? event.result
         : (typeof event.result?.content?.[0]?.text === "string" ? event.result.content[0].text : String(event.result));
+      // Let recordToolInvocationError classify the failure so non-gsd_ harness
+      // errors and deterministic policy rejections are handled consistently.
       recordToolInvocationError(event.toolName, errorText);
     }
     // Safety harness: record tool execution results for evidence cross-referencing

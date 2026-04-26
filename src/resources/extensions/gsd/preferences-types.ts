@@ -114,6 +114,7 @@ export const KNOWN_PREFERENCE_KEYS = new Set<string>([
   "post_unit_hooks",
   "pre_dispatch_hooks",
   "dynamic_routing",
+  "disabled_model_providers",
   "uok",
   "token_profile",
   "phases",
@@ -320,6 +321,8 @@ export interface GSDPreferences {
   post_unit_hooks?: PostUnitHookConfig[];
   pre_dispatch_hooks?: PreDispatchHookConfig[];
   dynamic_routing?: DynamicRoutingConfig;
+  /** Provider IDs to exclude from /model and automatic model routing while leaving tool auth intact. */
+  disabled_model_providers?: string[];
   /** Unified Orchestration Kernel controls (default-on, with opt-out and emergency legacy fallback). */
   uok?: UokPreferences;
   /** Per-model capability overrides. Deep-merged with built-in profiles for capability-aware routing (ADR-004). */

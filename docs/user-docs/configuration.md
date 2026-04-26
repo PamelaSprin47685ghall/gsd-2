@@ -701,6 +701,15 @@ dynamic_routing:
   cross_provider: true
 ```
 
+### `disabled_model_providers` (v2.60)
+
+Hide specific providers from model selection and routing without removing their auth credentials. Useful when you want a provider for tools (like `google_search`) but never want its models in `/model` or auto routing.
+
+```yaml
+disabled_model_providers:
+  - google-gemini-cli
+```
+
 ### `context_management` (v2.59)
 
 Controls observation masking and tool result truncation during auto-mode sessions. Reduces context bloat between compactions with zero LLM overhead.

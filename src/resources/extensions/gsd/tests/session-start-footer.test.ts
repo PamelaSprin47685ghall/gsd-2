@@ -16,7 +16,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -142,4 +142,91 @@ test("session_start does NOT call setFooter or suppress gsd-health when isAutoAc
 
   assert.equal(setFooterCallCount, 0, "setFooter must NOT be called when isAutoActive() is false");
   assert.equal(healthWidgetHideCount, 0, "gsd-health must NOT be hidden when isAutoActive() is false");
+});
+
+test("session_start and session_switch apply disabled model provider policy from current preferences", async (t) => {
+  const dir = join(
+    tmpdir(),
+    `gsd-disabled-provider-policy-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  );
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  const tempGsdHome = join(dir, "home");
+  mkdirSync(tempGsdHome, { recursive: true });
+
+  const originalCwd = process.cwd();
+  const originalGsdHome = process.env.GSD_HOME;
+  process.env.GSD_HOME = tempGsdHome;
+  process.chdir(dir);
+  t.after(() => {
+    process.chdir(originalCwd);
+    if (originalGsdHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = originalGsdHome;
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  const writePrefs = (providers: string[]) => {
+    writeFileSync(
+      join(dir, ".gsd", "PREFERENCES.md"),
+      [
+        "---",
+        "version: 1",
+        "disabled_model_providers:",
+        ...providers.map((provider) => `  - ${provider}`),
+        "---",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+  };
+
+  const appliedPolicies: string[][] = [];
+  const handlers = new Map<string, (event: unknown, ctx: any) => Promise<void> | void>();
+  const pi = {
+    on(event: string, handler: (event: unknown, ctx: any) => Promise<void> | void) {
+      handlers.set(event, handler);
+    },
+  } as any;
+  const ctx = {
+    hasUI: true,
+    ui: {
+      notify: () => {},
+      setStatus: () => {},
+      setFooter: () => {},
+      setWorkingMessage: () => {},
+      onTerminalInput: () => () => {},
+      setWidget: () => {},
+    },
+    sessionManager: { getSessionId: () => null },
+    model: null,
+    modelRegistry: {
+      setDisabledModelProviders: (providers: string[]) => {
+        appliedPolicies.push([...providers]);
+      },
+      getProviderAuthMode: () => undefined,
+      isProviderRequestReady: () => false,
+    },
+  };
+
+  registerHooks(pi, []);
+
+  const sessionStart = handlers.get("session_start");
+  const sessionSwitch = handlers.get("session_switch");
+  assert.ok(sessionStart, "session_start handler must be registered");
+  assert.ok(sessionSwitch, "session_switch handler must be registered");
+
+  writePrefs(["google-gemini-cli", " google-gemini-cli ", "openai-codex"]);
+  await sessionStart!({}, ctx);
+  assert.deepEqual(
+    appliedPolicies.at(-1),
+    ["google-gemini-cli", "openai-codex"],
+    "session_start should apply normalized disabled providers before the first agent turn",
+  );
+
+  writePrefs(["anthropic"]);
+  await sessionSwitch!({ reason: "resume" }, ctx);
+  assert.deepEqual(
+    appliedPolicies.at(-1),
+    ["anthropic"],
+    "session_switch should re-read preferences for the switched project/session context",
+  );
 });
