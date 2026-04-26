@@ -89,7 +89,7 @@ test("buildResourceLoader excludes duplicate top-level pi extensions when bundle
   writeFileSync(join(piExtensionsDir, "custom-extension.ts"), "export {};\n");
 
   const { buildResourceLoader } = await import("../resource-loader.ts");
-  const loader = buildResourceLoader(fakeAgentDir) as { additionalExtensionPaths?: string[] };
+  const loader = await buildResourceLoader(fakeAgentDir) as { additionalExtensionPaths?: string[] };
   const additionalExtensionPaths = loader.additionalExtensionPaths ?? [];
 
   assert.equal(

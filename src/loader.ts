@@ -70,7 +70,7 @@ if (firstArg === '--help' || firstArg === '-h') {
 }
 
 import { agentDir, appRoot } from './app-paths.js'
-import { applyRtkProcessEnv } from './rtk.js'
+import { applyRtkProcessEnv } from './rtk-shared.js'
 import { serializeBundledExtensionPaths } from './bundled-extension-paths.js'
 import { discoverExtensionEntryPaths } from './extension-discovery.js'
 import { loadRegistry, readManifestFromEntryPath, isExtensionEnabled } from './extension-registry.js'

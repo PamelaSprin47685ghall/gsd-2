@@ -1,14 +1,8 @@
-import {
-  AuthStorage,
-  DefaultResourceLoader,
-  ModelRegistry,
-  runPackageCommand,
-  SettingsManager,
-  SessionManager,
-  createAgentSession,
-  InteractiveMode,
-  runPrintMode,
-  runRpcMode,
+import type {
+  DefaultResourceLoader as DefaultResourceLoaderInstance,
+  ModelRegistry as ModelRegistryInstance,
+  PackageCommand,
+  SettingsManager as SettingsManagerInstance,
 } from '@gsd/pi-coding-agent'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -34,8 +28,16 @@ import {
 import { stopWebMode } from './web-mode.js'
 import { getProjectSessionsDir } from './project-sessions.js'
 import { markStartup, printStartupTimings } from './startup-timings.js'
-import { bootstrapRtk, GSD_RTK_DISABLED_ENV } from './rtk.js'
-import { loadEffectiveGSDPreferences } from './resources/extensions/gsd/preferences.js'
+import { applyRtkProcessEnv, GSD_RTK_DISABLED_ENV } from './rtk-shared.js'
+import type { EnsureRtkResult } from './rtk.js'
+
+type PiCodingAgentModule = typeof import('@gsd/pi-coding-agent')
+
+let piCodingAgentModulePromise: Promise<PiCodingAgentModule> | undefined
+
+function loadPiCodingAgentModule(): Promise<PiCodingAgentModule> {
+  return (piCodingAgentModulePromise ??= import('@gsd/pi-coding-agent'))
+}
 
 // ---------------------------------------------------------------------------
 // V8 compile cache — Node 22+ can cache compiled bytecode across runs,
@@ -120,8 +122,8 @@ function printExtensionWarnings(warnings: ReadonlyArray<{ message: string }> | u
  */
 async function reapplyValidatedModelOnFallback(
   session: { setModel(model: { provider: string; id: string }): unknown | Promise<unknown> },
-  modelRegistry: ModelRegistry,
-  settingsManager: SettingsManager,
+  modelRegistry: ModelRegistryInstance,
+  settingsManager: SettingsManagerInstance,
   fallbackMessage: string | undefined,
 ): Promise<void> {
   if (!fallbackMessage) return
@@ -159,25 +161,45 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
 // so concurrent callers await the same initialization.
 let rtkBootstrapPromise: Promise<void> | undefined
 async function doRtkBootstrap(): Promise<void> {
+  let rtkStatus: EnsureRtkResult | undefined
+
   // RTK is opt-in via experimental.rtk preference. Default: disabled.
   // Honor GSD_RTK_DISABLED if already explicitly set in the environment
   // (env var takes precedence over preferences for manual override).
   if (!process.env[GSD_RTK_DISABLED_ENV]) {
+    const { loadEffectiveGSDPreferences } = await import('./resources/extensions/gsd/preferences.js')
     const prefs = loadEffectiveGSDPreferences()
     const rtkEnabled = prefs?.preferences.experimental?.rtk === true
     if (!rtkEnabled) {
       process.env[GSD_RTK_DISABLED_ENV] = '1'
     }
   }
+  markStartup('rtkPreferenceCheck')
 
-  const rtkStatus = await bootstrapRtk()
+  if (process.env[GSD_RTK_DISABLED_ENV]) {
+    applyRtkProcessEnv(process.env)
+    rtkStatus = {
+      enabled: false,
+      supported: true,
+      available: false,
+      source: 'disabled',
+      reason: `${GSD_RTK_DISABLED_ENV} is set`,
+    }
+  } else {
+    const { bootstrapRtk } = await import('./rtk.js')
+    rtkStatus = await bootstrapRtk()
+  }
   markStartup('bootstrapRtk')
   if (!rtkStatus.available && rtkStatus.supported && rtkStatus.enabled && rtkStatus.reason) {
     process.stderr.write(`[gsd] Warning: RTK unavailable — continuing without shell-command compression (${rtkStatus.reason}).\n`)
   }
 }
 function ensureRtkBootstrap(): Promise<void> {
-  return (rtkBootstrapPromise ??= doRtkBootstrap())
+  if (!rtkBootstrapPromise) {
+    markStartup('preRtkBootstrap')
+    rtkBootstrapPromise = doRtkBootstrap()
+  }
+  return rtkBootstrapPromise
 }
 
 // `gsd update` — update to the latest version via npm.
@@ -278,21 +300,26 @@ if (!process.stdin.isTTY && !isPrintMode && !hasSubcommand && !cliFlags.listMode
   printNonTtyErrorAndExit(undefined, false)
 }
 
-const packageCommand = await runPackageCommand({
-  appName: 'gsd',
-  args: process.argv.slice(2),
-  cwd: process.cwd(),
-  agentDir,
-  stdout: process.stdout,
-  stderr: process.stderr,
-  allowedCommands: new Set(['install', 'remove', 'list']),
-})
-if (packageCommand.handled) {
-  process.exit(packageCommand.exitCode)
+const packageCommandNames: ReadonlySet<PackageCommand> = new Set(['install', 'remove', 'list'])
+if (packageCommandNames.has(cliFlags.messages[0] as PackageCommand)) {
+  const { runPackageCommand } = await loadPiCodingAgentModule()
+  const packageCommand = await runPackageCommand({
+    appName: 'gsd',
+    args: process.argv.slice(2),
+    cwd: process.cwd(),
+    agentDir,
+    stdout: process.stdout,
+    stderr: process.stderr,
+    allowedCommands: packageCommandNames,
+  })
+  if (packageCommand.handled) {
+    process.exit(packageCommand.exitCode)
+  }
 }
 
 // `gsd config` — replay the setup wizard and exit
 if (cliFlags.messages[0] === 'config') {
+  const { AuthStorage } = await loadPiCodingAgentModule()
   const authStorage = AuthStorage.create(authFilePath)
   loadStoredEnvKeys(authStorage)
   await runOnboarding(authStorage)
@@ -328,6 +355,7 @@ if (cliFlags.web || (cliFlags.messages[0] === 'web' && cliFlags.messages[1] !== 
 
 // `gsd sessions` — list past sessions and pick one to resume
 if (cliFlags.messages[0] === 'sessions') {
+  const { SessionManager } = await loadPiCodingAgentModule()
   const cwd = process.cwd()
   const safePath = `--${cwd.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`
   const projectSessionsDir = join(sessionsDir, safePath)
@@ -416,7 +444,7 @@ async function runHeadlessFromAuto(headlessArgs: string[]): Promise<never> {
   process.exit(0)
 }
 
-function flushPendingProviderRegistrations(resourceLoader: DefaultResourceLoader, modelRegistry: ModelRegistry): void {
+function flushPendingProviderRegistrations(resourceLoader: DefaultResourceLoaderInstance, modelRegistry: ModelRegistryInstance): void {
   const { runtime } = resourceLoader.getExtensions()
   for (const { name, config } of runtime.pendingProviderRegistrations) {
     modelRegistry.registerProvider(name, config)
@@ -430,6 +458,19 @@ function flushPendingProviderRegistrations(resourceLoader: DefaultResourceLoader
 if (cliFlags.messages[0] === 'auto') {
   await runHeadlessFromAuto(buildHeadlessAutoArgs(cliFlags))
 }
+
+const {
+  AuthStorage,
+  DefaultResourceLoader,
+  ModelRegistry,
+  SettingsManager,
+  SessionManager,
+  createAgentSession,
+  InteractiveMode,
+  runPrintMode,
+  runRpcMode,
+} = await loadPiCodingAgentModule()
+markStartup('loadPiCodingAgent')
 
 // Pi's tool bootstrap can mis-detect already-installed fd/rg on some systems
 // because spawnSync(..., ["--version"]) returns EPERM despite a zero exit code.
@@ -547,6 +588,7 @@ if (!settingsManager.getQuietStartup()) {
 if (!settingsManager.getCollapseChangelog()) {
   settingsManager.setCollapseChangelog(true)
 }
+markStartup('startupSettings')
 
 // ---------------------------------------------------------------------------
 // Print / subagent mode — single-shot execution, no TTY required
@@ -581,7 +623,7 @@ if (isPrintMode) {
   flushPendingProviderRegistrations(resourceLoader, modelRegistry)
   migrateAnthropicDefaultToClaudeCode({
     authStorage,
-    isClaudeCodeReady: modelRegistry.isProviderRequestReady('claude-code'),
+    isClaudeCodeReady: () => modelRegistry.isProviderRequestReady('claude-code'),
     settingsManager,
     modelRegistry,
   })
@@ -689,10 +731,11 @@ if (cliFlags.worktree) {
 // ---------------------------------------------------------------------------
 if (!cliFlags.worktree && !isPrintMode) {
   try {
-    const { handleStatusBanner } = await import('./worktree-cli.js')
-    await handleStatusBanner(process.cwd())
+    const { showWorktreeStatusBanner } = await import('./worktree-status-banner.js')
+    showWorktreeStatusBanner(process.cwd())
   } catch { /* non-fatal */ }
 }
+markStartup('worktreeStatusBanner')
 
 // ---------------------------------------------------------------------------
 // Auto-redirect: `gsd auto` with piped stdout → headless mode (#2732)
@@ -734,7 +777,7 @@ markStartup('initResources')
 // Overlap resource loading with session manager setup — both are independent.
 // resourceLoader.reload() is the most expensive step (jiti compilation), so
 // starting it early shaves ~50-200ms off interactive startup.
-const resourceLoader = buildResourceLoader(agentDir)
+const resourceLoader = await buildResourceLoader(agentDir)
 const resourceLoadPromise = resourceLoader.reload()
 
 // While resources load, let session manager finish any async I/O it needs.
@@ -744,10 +787,11 @@ markStartup('resourceLoader.reload')
 flushPendingProviderRegistrations(resourceLoader, modelRegistry)
 migrateAnthropicDefaultToClaudeCode({
   authStorage,
-  isClaudeCodeReady: modelRegistry.isProviderRequestReady('claude-code'),
+  isClaudeCodeReady: () => modelRegistry.isProviderRequestReady('claude-code'),
   settingsManager,
   modelRegistry,
 })
+markStartup('providerMigrations')
 
 const { session, extensionsResult, modelFallbackMessage: interactiveFallbackMsg } = await createAgentSession({
   authStorage,
