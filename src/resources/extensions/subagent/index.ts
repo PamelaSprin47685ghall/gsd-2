@@ -260,7 +260,7 @@ function writePromptToTempFile(agentName: string, prompt: string): { dir: string
 	return { dir: tmpDir, filePath };
 }
 
-function buildSubagentProcessArgs(
+export function buildSubagentProcessArgs(
 	agent: AgentConfig,
 	task: string,
 	tmpPromptPath: string | null,
