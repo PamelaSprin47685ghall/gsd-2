@@ -45,6 +45,23 @@ test('agent dir is selected when state.ts exists under it (#3471)', (t) => {
   assert.equal(result.useAgentDir, true)
 })
 
+test('agent dir is selected when synced JS state exists under it', (t) => {
+  const root = makeTempDir()
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const extDir = join(root, 'extensions', 'gsd')
+  mkdirSync(extDir, { recursive: true })
+  writeFileSync(join(extDir, 'state.js'), '// fixture')
+
+  const result = shouldUseAgentExtensionsDir({ env: { GSD_AGENT_DIR: root } })
+  assert.equal(result.agentDir, extDir)
+  assert.equal(result.useAgentDir, true)
+})
+
+test('GSD_HOME drives default agent dir when GSD_AGENT_DIR is absent', () => {
+  const root = resolveGsdAgentExtensionsDir({ GSD_HOME: '/custom/gsd-home' })
+  assert.equal(root, join('/custom/gsd-home', 'agent', 'extensions', 'gsd'))
+})
+
 test('agent dir is rejected when state.ts is absent (falls back to bundled)', (t) => {
   const root = makeTempDir()
   t.after(() => rmSync(root, { recursive: true, force: true }))
@@ -60,9 +77,12 @@ test('fileExists callback drives the decision (no real fs required)', () => {
     env: { GSD_AGENT_DIR: '/agent' },
     fileExists: (p) => {
       calls.push(p)
-      return true
+      return p.endsWith('state.js')
     },
   })
   assert.equal(result.useAgentDir, true)
-  assert.deepEqual(calls, [join('/agent', 'extensions', 'gsd', 'state.ts')])
+  assert.deepEqual(calls, [
+    join('/agent', 'extensions', 'gsd', 'state.ts'),
+    join('/agent', 'extensions', 'gsd', 'state.js'),
+  ])
 })

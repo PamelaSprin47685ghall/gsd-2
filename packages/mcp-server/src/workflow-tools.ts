@@ -7,6 +7,8 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 
+import { logAliasUsage } from "./alias-telemetry.js";
+
 type WorkflowToolExecutors = {
   SUPPORTED_SUMMARY_ARTIFACT_TYPES: readonly string[];
   executeMilestoneStatus: (params: { milestoneId: string }, basePath?: string) => Promise<unknown>;
@@ -1340,6 +1342,7 @@ export function registerWorkflowTools(server: McpToolServer): void {
     "Alias for gsd_decision_save. Record a project decision to the GSD database and regenerate DECISIONS.md.",
     decisionSaveParams,
     async (args: Record<string, unknown>) => {
+      logAliasUsage("gsd_save_decision", "gsd_decision_save");
       const parsed = parseWorkflowArgs(decisionSaveSchema, args);
       const { projectDir, ...params } = parsed;
       await enforceWorkflowWriteGate("gsd_decision_save", projectDir);
@@ -1372,6 +1375,7 @@ export function registerWorkflowTools(server: McpToolServer): void {
     "Alias for gsd_requirement_update. Update an existing requirement in the GSD database and regenerate REQUIREMENTS.md.",
     requirementUpdateParams,
     async (args: Record<string, unknown>) => {
+      logAliasUsage("gsd_update_requirement", "gsd_requirement_update");
       const parsed = parseWorkflowArgs(requirementUpdateSchema, args);
       const { projectDir, id, ...updates } = parsed;
       await enforceWorkflowWriteGate("gsd_requirement_update", projectDir);
@@ -1404,6 +1408,7 @@ export function registerWorkflowTools(server: McpToolServer): void {
     "Alias for gsd_requirement_save. Record a new requirement to the GSD database and regenerate REQUIREMENTS.md.",
     requirementSaveParams,
     async (args: Record<string, unknown>) => {
+      logAliasUsage("gsd_save_requirement", "gsd_requirement_save");
       const parsed = parseWorkflowArgs(requirementSaveSchema, args);
       const { projectDir, ...params } = parsed;
       await enforceWorkflowWriteGate("gsd_requirement_save", projectDir);
@@ -1434,6 +1439,7 @@ export function registerWorkflowTools(server: McpToolServer): void {
     "Alias for gsd_milestone_generate_id. Generate the next milestone ID for a new GSD milestone.",
     milestoneGenerateIdParams,
     async (args: Record<string, unknown>) => {
+      logAliasUsage("gsd_generate_milestone_id", "gsd_milestone_generate_id");
       const { projectDir } = parseWorkflowArgs(milestoneGenerateIdSchema, args);
       await enforceWorkflowWriteGate("gsd_milestone_generate_id", projectDir);
       const id = await runSerializedWorkflowDbOperation(projectDir, () =>
@@ -1499,6 +1505,7 @@ export function registerWorkflowTools(server: McpToolServer): void {
     "Alias for gsd_plan_task. Write task planning state to the GSD database and render tasks/T##-PLAN.md from DB.",
     planTaskParams,
     async (args: Record<string, unknown>) => {
+      logAliasUsage("gsd_task_plan", "gsd_plan_task");
       const parsed = parseWorkflowArgs(planTaskSchema, args);
       const { projectDir, ...params } = parsed;
       await enforceWorkflowWriteGate("gsd_plan_task", projectDir, params.milestoneId);
@@ -1530,6 +1537,7 @@ export function registerWorkflowTools(server: McpToolServer): void {
     "Alias for gsd_replan_slice. Replan a slice after a blocker is discovered.",
     replanSliceParams,
     async (args: Record<string, unknown>) => {
+      logAliasUsage("gsd_slice_replan", "gsd_replan_slice");
       const parsed = parseWorkflowArgs(replanSliceSchema, args);
       return handleReplanSlice(parsed.projectDir, parsed);
     },
@@ -1550,6 +1558,7 @@ export function registerWorkflowTools(server: McpToolServer): void {
     "Alias for gsd_slice_complete. Record a completed slice to the GSD database and render summary/UAT artifacts.",
     sliceCompleteParams,
     async (args: Record<string, unknown>) => {
+      logAliasUsage("gsd_complete_slice", "gsd_slice_complete");
       const parsed = parseWorkflowArgs(sliceCompleteSchema, args);
       return handleSliceComplete(parsed.projectDir, parsed);
     },
@@ -1600,6 +1609,7 @@ export function registerWorkflowTools(server: McpToolServer): void {
     "Alias for gsd_complete_milestone. Record a completed milestone to the GSD database and render its SUMMARY.md.",
     completeMilestoneParams,
     async (args: Record<string, unknown>) => {
+      logAliasUsage("gsd_milestone_complete", "gsd_complete_milestone");
       const parsed = parseWorkflowArgs(completeMilestoneSchema, args);
       return handleCompleteMilestone(parsed.projectDir, parsed);
     },
@@ -1620,6 +1630,7 @@ export function registerWorkflowTools(server: McpToolServer): void {
     "Alias for gsd_validate_milestone. Validate a milestone and render VALIDATION.md.",
     validateMilestoneParams,
     async (args: Record<string, unknown>) => {
+      logAliasUsage("gsd_milestone_validate", "gsd_validate_milestone");
       const parsed = parseWorkflowArgs(validateMilestoneSchema, args);
       return handleValidateMilestone(parsed.projectDir, parsed);
     },
@@ -1640,6 +1651,7 @@ export function registerWorkflowTools(server: McpToolServer): void {
     "Alias for gsd_reassess_roadmap. Reassess a roadmap after slice completion.",
     reassessRoadmapParams,
     async (args: Record<string, unknown>) => {
+      logAliasUsage("gsd_roadmap_reassess", "gsd_reassess_roadmap");
       const parsed = parseWorkflowArgs(reassessRoadmapSchema, args);
       return handleReassessRoadmap(parsed.projectDir, parsed);
     },
@@ -1694,6 +1706,7 @@ export function registerWorkflowTools(server: McpToolServer): void {
     "Alias for gsd_task_complete. Record a completed task to the GSD database and render its SUMMARY.md.",
     taskCompleteParams,
     async (args: Record<string, unknown>) => {
+      logAliasUsage("gsd_complete_task", "gsd_task_complete");
       const parsed = parseWorkflowArgs(taskCompleteSchema, args);
       const { projectDir, ...taskArgs } = parsed;
       return handleTaskComplete(projectDir, taskArgs);

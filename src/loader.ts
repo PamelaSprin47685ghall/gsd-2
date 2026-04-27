@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 // GSD Startup Loader
-// Copyright (c) 2026 Jeremy McSpadden <jeremy@fluxlabs.net>
 import { fileURLToPath } from 'url'
 import { dirname, resolve, join, relative, delimiter } from 'path'
 import { existsSync, readFileSync, readdirSync, statSync, mkdirSync, symlinkSync, cpSync } from 'fs'
@@ -70,8 +69,9 @@ if (firstArg === '--help' || firstArg === '-h') {
 }
 
 import { agentDir, appRoot } from './app-paths.js'
-import { applyRtkProcessEnv } from './rtk.js'
+import { applyRtkProcessEnv } from './rtk-shared.js'
 import { serializeBundledExtensionPaths } from './bundled-extension-paths.js'
+import { resolveBundledResourcesDirFromPackageRoot } from './bundled-resource-path.js'
 import { discoverExtensionEntryPaths } from './extension-discovery.js'
 import { loadRegistry, readManifestFromEntryPath, isExtensionEnabled } from './extension-registry.js'
 import { renderLogo } from './logo.js'
@@ -142,9 +142,7 @@ process.env.GSD_BIN_PATH = process.argv[1]
 // GSD_WORKFLOW_PATH — absolute path to bundled GSD-WORKFLOW.md, used by patched gsd extension
 // when dispatching workflow prompts. Prefers dist/resources/ (stable, set at build time)
 // over src/resources/ (live working tree) — see resource-loader.ts for rationale.
-const distRes = join(gsdRoot, 'dist', 'resources')
-const srcRes = join(gsdRoot, 'src', 'resources')
-const resourcesDir = existsSync(distRes) ? distRes : srcRes
+const resourcesDir = resolveBundledResourcesDirFromPackageRoot(gsdRoot)
 process.env.GSD_WORKFLOW_PATH = join(resourcesDir, 'GSD-WORKFLOW.md')
 
 // GSD_BUNDLED_EXTENSION_PATHS — dynamically discovered bundled extension entry points.

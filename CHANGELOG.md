@@ -6,6 +6,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Deprecated
+- **mcp-server**: 11 `gsd_*` alias tools (`gsd_save_decision`, `gsd_update_requirement`, `gsd_save_requirement`, `gsd_generate_milestone_id`, `gsd_task_plan`, `gsd_slice_replan`, `gsd_complete_slice`, `gsd_milestone_complete`, `gsd_milestone_validate`, `gsd_roadmap_reassess`, `gsd_complete_task`) are entering a deprecation window. Each invocation now emits a `deprecation.mcp_alias_used` JSONL record to stderr. Use the canonical names (`gsd_decision_save`, etc.). The aliases will be removed in a future release after telemetry confirms zero usage. (#5031)
+
 ## [2.78.1] - 2026-04-25
 
 ### Fixed

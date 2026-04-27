@@ -9,12 +9,21 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join, sep } from 'node:path';
 
-import { shouldBlockPlanningUnit } from '../bootstrap/write-gate.ts';
+import { ALLOWED_PLANNING_DISPATCH_AGENTS, shouldBlockPlanningUnit } from '../bootstrap/write-gate.ts';
+import { extractSubagentAgentClasses } from '../bootstrap/subagent-input.ts';
 import { isDeterministicPolicyError } from '../auto-tool-tracking.ts';
 import type { ToolsPolicy } from '../unit-context-manifest.ts';
 
 const BASE = join('/tmp', 'fake-project');
 const PLANNING: ToolsPolicy = { mode: 'planning' };
+const PLANNING_DISPATCH: ToolsPolicy = {
+  mode: 'planning-dispatch',
+  allowedSubagents: [...ALLOWED_PLANNING_DISPATCH_AGENTS],
+};
+const PLANNING_DISPATCH_REVIEW: ToolsPolicy = {
+  mode: 'planning-dispatch',
+  allowedSubagents: ['reviewer', 'security', 'tester'],
+};
 const READ_ONLY: ToolsPolicy = { mode: 'read-only' };
 const ALL: ToolsPolicy = { mode: 'all' };
 const DOCS: ToolsPolicy = {
@@ -141,6 +150,112 @@ test('planning-unit: blocks subagent dispatch in planning mode', () => {
 test('planning-unit: blocks task tool (alt subagent name)', () => {
   const r = shouldBlockPlanningUnit('task', '', BASE, 'discuss-milestone', PLANNING);
   assert.strictEqual(r.block, true);
+});
+
+test('planning-dispatch: allows subagent dispatch (delegated recon/planner during slice planning)', () => {
+  const r = shouldBlockPlanningUnit('subagent', '', BASE, 'plan-slice', PLANNING_DISPATCH, ['scout']);
+  assert.strictEqual(r.block, false);
+});
+
+test('planning-dispatch: allows task dispatch (delegated recon/planner during slice planning)', () => {
+  const r = shouldBlockPlanningUnit('task', '', BASE, 'plan-slice', PLANNING_DISPATCH, ['planner']);
+  assert.strictEqual(r.block, false);
+});
+
+test('planning-dispatch: extracts subagent classes from single, parallel, and chain inputs', () => {
+  assert.deepEqual(extractSubagentAgentClasses({ agent: ' scout ' }), ['scout']);
+  assert.deepEqual(
+    extractSubagentAgentClasses({ tasks: [{ agent: 'planner' }, { agent: ' tester ' }] }),
+    ['planner', 'tester'],
+  );
+  assert.deepEqual(
+    extractSubagentAgentClasses({ chain: [{ agent: 'reviewer' }, { agent: 'security' }] }),
+    ['reviewer', 'security'],
+  );
+});
+
+test('planning-dispatch: blocks subagent dispatch when agentClasses is undefined (stale caller shim)', () => {
+  const r = shouldBlockPlanningUnit('subagent', '', BASE, 'plan-slice', PLANNING_DISPATCH, undefined);
+  assert.strictEqual(r.block, true);
+  assert.match(r.reason!, /stale caller/);
+  assert.match(r.reason!, /tools-policy "planning-dispatch"/);
+});
+
+test('planning-dispatch: allows explicitly empty agent classes for downstream validation', () => {
+  const emptyClasses = extractSubagentAgentClasses({});
+  assert.deepEqual(emptyClasses, []);
+  const empty = shouldBlockPlanningUnit('subagent', '', BASE, 'plan-slice', PLANNING_DISPATCH, emptyClasses);
+  assert.strictEqual(empty.block, false);
+});
+
+test('planning-dispatch: allows all globally allowed specialists when listed by policy', () => {
+  const policy: ToolsPolicy = {
+    mode: 'planning-dispatch',
+    allowedSubagents: [...ALLOWED_PLANNING_DISPATCH_AGENTS],
+  };
+  const r = shouldBlockPlanningUnit(
+    'subagent',
+    '',
+    BASE,
+    'complete-milestone',
+    policy,
+    [...ALLOWED_PLANNING_DISPATCH_AGENTS],
+  );
+  assert.strictEqual(r.block, false);
+});
+
+test('planning-dispatch: blocks implementation-tier agent', () => {
+  const r = shouldBlockPlanningUnit('subagent', '', BASE, 'plan-slice', PLANNING_DISPATCH, ['worker']);
+  assert.strictEqual(r.block, true);
+  assert.match(r.reason!, /"worker"/);
+  assert.match(r.reason!, /read-only specialists/);
+});
+
+test('planning-dispatch: blocks globally disallowed agent even if listed by policy', () => {
+  const policy: ToolsPolicy = {
+    mode: 'planning-dispatch',
+    allowedSubagents: ['refactorer'],
+  };
+  const r = shouldBlockPlanningUnit('subagent', '', BASE, 'refine-slice', policy, ['refactorer']);
+  assert.strictEqual(r.block, true);
+  assert.match(r.reason!, /"refactorer"/);
+  assert.match(r.reason!, /read-only specialists/);
+  assert.doesNotMatch(r.reason!, /ToolsPolicy\.allowedSubagents|permitted agents for this unit/);
+});
+
+test('planning-dispatch: blocks mixed batch containing a disallowed agent', () => {
+  const r = shouldBlockPlanningUnit('subagent', '', BASE, 'plan-slice', PLANNING_DISPATCH, ['scout', 'worker']);
+  assert.strictEqual(r.block, true);
+  assert.match(r.reason!, /"worker"/);
+});
+
+test('planning-dispatch: allows review-tier agent under closeout policy', () => {
+  const r = shouldBlockPlanningUnit('subagent', '', BASE, 'complete-slice', PLANNING_DISPATCH_REVIEW, ['reviewer']);
+  assert.strictEqual(r.block, false);
+});
+
+test('planning-dispatch: blocks recon agent under closeout policy', () => {
+  const r = shouldBlockPlanningUnit('subagent', '', BASE, 'complete-slice', PLANNING_DISPATCH_REVIEW, ['scout']);
+  assert.strictEqual(r.block, true);
+  assert.match(r.reason!, /"scout"/);
+  assert.match(r.reason!, /ToolsPolicy\.allowedSubagents|permitted agents for this unit/);
+  assert.doesNotMatch(r.reason!, /read-only specialists/);
+});
+
+test('planning-dispatch: still blocks writes to user source (write isolation preserved)', () => {
+  const r = shouldBlockPlanningUnit('write', join(BASE, 'src', 'main.ts'), BASE, 'plan-slice', PLANNING_DISPATCH);
+  assert.strictEqual(r.block, true);
+});
+
+test('planning-dispatch: still allows writes inside .gsd/', () => {
+  const r = shouldBlockPlanningUnit(
+    'write',
+    join(BASE, '.gsd', 'milestones', 'M001', 'slices', 'S01', 'PLAN.md'),
+    BASE,
+    'plan-slice',
+    PLANNING_DISPATCH,
+  );
+  assert.strictEqual(r.block, false);
 });
 
 // ─── planning mode: pass-through tools ────────────────────────────────────

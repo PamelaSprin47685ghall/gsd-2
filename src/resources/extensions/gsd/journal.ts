@@ -60,7 +60,10 @@ export type JournalEventType =
   | "canonical-root-redirect"
   // #4765 — slice-cadence collapse
   | "slice-merged"
-  | "milestone-resquash";
+  | "milestone-resquash"
+  // dispatch telemetry — measure agent/subagent invocation frequency and shape
+  | "subagent-invoked"
+  | "subagent-completed";
 
 /** A single structured event in the journal. */
 export interface JournalEntry {

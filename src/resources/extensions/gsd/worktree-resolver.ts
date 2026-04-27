@@ -23,6 +23,7 @@ import { emitJournalEvent } from "./journal.js";
 import { emitWorktreeCreated, emitWorktreeMerged } from "./worktree-telemetry.js";
 import { getCollapseCadence, getMilestoneResquash, resquashMilestoneOnMain } from "./slice-cadence.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
+import { resolveWorktreeProjectRoot } from "./worktree-root.js";
 
 // ─── Dependency Interface ──────────────────────────────────────────────────
 
@@ -85,30 +86,19 @@ export interface NotifyCtx {
 // ─── Path Helpers ──────────────────────────────────────────────────────────
 
 /**
- * Worktree marker segment — present in any path produced by worktreePath().
- * Used to strip the worktree suffix and recover the project root (#3729).
- */
-const WORKTREE_MARKER = "/.gsd/worktrees/";
-
-/**
  * Resolve the project root from session path state.
  *
  * Prefers `originalBasePath` (always the project root when set), but falls
  * back to `basePath` when `originalBasePath` is falsy (e.g. fresh AutoSession
  * with default empty string). If `basePath` itself is inside a worktree
- * directory (contains `/.gsd/worktrees/`), strip that suffix to recover the
- * actual project root — preventing double-nested worktree paths (#3729).
+ * directory (including symlink-resolved ~/.gsd/projects/<hash>/worktrees
+ * paths), recover the actual project root to prevent double nesting (#3729).
  */
 export function resolveProjectRoot(
   originalBasePath: string,
   basePath: string,
 ): string {
-  let resolved = originalBasePath || basePath;
-  const markerIdx = resolved.indexOf(WORKTREE_MARKER);
-  if (markerIdx !== -1) {
-    resolved = resolved.slice(0, markerIdx);
-  }
-  return resolved;
+  return resolveWorktreeProjectRoot(basePath, originalBasePath);
 }
 
 // ─── WorktreeResolver ──────────────────────────────────────────────────────

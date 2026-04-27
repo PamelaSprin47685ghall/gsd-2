@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { restoreSliceState } from "../slice-parallel-orchestrator.ts";
+import { restoreSliceState, SLICE_WORKER_AUTO_ARGS } from "../slice-parallel-orchestrator.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const gsdDir = join(__dirname, "..");
@@ -98,6 +98,12 @@ describe("slice-parallel-orchestrator structural tests", () => {
       source.includes("GSD_PARALLEL_WORKER"),
       "Orchestrator must set GSD_PARALLEL_WORKER to prevent nested parallel",
     );
+  });
+
+  it("slice workers use headless auto instead of print-mode slash commands", () => {
+    const args: readonly string[] = SLICE_WORKER_AUTO_ARGS;
+    assert.deepEqual([...args], ["headless", "--json", "auto"]);
+    assert.equal(args.includes("--print"), false);
   });
 
   it("maxWorkers default is 2", () => {

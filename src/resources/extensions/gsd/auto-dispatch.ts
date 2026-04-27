@@ -797,14 +797,25 @@ export const DISPATCH_RULES: DispatchRule[] = [
       if (state.phase !== "executing" || !state.activeTask) return null;
       if (!state.activeSlice) return null; // fall through
 
-      // Only activate when reactive_execution is explicitly enabled
+      // Reactive dispatch is on by default when there are enough ready tasks to
+      // benefit from parallelism. Users opt out explicitly via
+      // `reactive_execution.enabled: false`. The downstream safety checks
+      // (graph ambiguity, ready-task count, conflict-free selection) still gate
+      // every actual dispatch, so the worst-case "default-on" outcome is the
+      // same fall-through to sequential execution as before.
       const reactiveConfig = prefs?.reactive_execution;
-      if (!reactiveConfig?.enabled) return null;
+      if (reactiveConfig?.enabled === false) return null;
 
       const sid = state.activeSlice.id;
       const sTitle = state.activeSlice.title;
-      const maxParallel = reactiveConfig.max_parallel ?? 2;
-      const subagentModel = reactiveConfig.subagent_model ?? resolveModelWithFallbacksForUnit("subagent")?.primary;
+      const maxParallel = reactiveConfig?.max_parallel ?? 2;
+      const subagentModel = reactiveConfig?.subagent_model ?? resolveModelWithFallbacksForUnit("subagent")?.primary;
+      // Default-on safety threshold: only activate reactive dispatch when at
+      // least N tasks are ready. Users who explicitly enabled reactive_execution
+      // keep the legacy threshold of 2 (matches the prior "any parallelism is
+      // better than none" intent). Default-on installs require >=3 to avoid
+      // surprising users with parallelism on small slices.
+      const minReadyTasksForReactive = reactiveConfig?.enabled === true ? 2 : 3;
 
       // Dry-run mode: max_parallel=1 means graph is derived and logged but
       // execution remains sequential
@@ -831,8 +842,9 @@ export const DISPATCH_RULES: DispatchRule[] = [
         const completed = new Set(graph.filter((n) => n.done).map((n) => n.id));
         const readyIds = getReadyTasks(graph, completed, new Set());
 
-        // Only activate reactive dispatch when >1 task is ready
-        if (readyIds.length <= 1) return null;
+        // Only activate reactive dispatch when enough tasks are ready.
+        // Threshold is 2 when explicitly opted in, 3 when default-on.
+        if (readyIds.length < minReadyTasksForReactive) return null;
 
         const uokFlags = resolveUokFlags(prefs);
         const selected = uokFlags.executionGraph

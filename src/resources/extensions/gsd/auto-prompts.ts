@@ -37,7 +37,7 @@ import { composeInlinedContext, type ArtifactResolver } from "./unit-context-com
 import { logWarning } from "./workflow-logger.js";
 import { inlineGraphSubgraph } from "./graph-context.js";
 import { buildExtractionStepsBlock } from "./commands-extract-learnings.js";
-import { warnIfManifestHasMissingSkills } from "./skill-manifest.js";
+import { resolveSkillManifest, warnIfManifestHasMissingSkills } from "./skill-manifest.js";
 
 // ─── Preamble Cap ─────────────────────────────────────────────────────────────
 
@@ -776,6 +776,25 @@ function formatSkillActivationBlock(skillNames: string[]): string {
   return `<skill_activation>${calls}.</skill_activation>`;
 }
 
+/**
+ * Manifest-driven recommendations block — informational only, does NOT
+ * auto-invoke. Lists per-unit-type skills that are installed but not already
+ * activated by explicit user intent (always_use_skills / prefer_skills /
+ * skill_rules / task-plan skills_used). Surfaces relevant skills to the
+ * model so they can be invoked when the model judges them useful.
+ *
+ * This is the additive complement to the existing activation directive:
+ * activation force-invokes (explicit intent), recommendations remind
+ * (manifest defaults). User intent is preserved as the stronger signal
+ * (RFC #4779 design principle); this block only adds visibility.
+ */
+function formatSkillRecommendationsBlock(unitType: string | undefined, skillNames: string[]): string {
+  if (!unitType) return "";
+  const safe = skillNames.filter(name => SAFE_SKILL_NAME.test(name));
+  if (safe.length === 0) return "";
+  return `<skill_recommendations unit="${unitType}">For this unit type, also consider invoking: ${safe.join(", ")}. Use Skill({ skill: 'name' }) when relevant — these are recommendations, not requirements.</skill_recommendations>`;
+}
+
 export function buildSkillActivationBlock(params: {
   base: string;
   milestoneId: string;
@@ -846,10 +865,49 @@ export function buildSkillActivationBlock(params: {
     }
   }
 
+  // Heuristic auto-match (gated on skill_discovery: "auto").
+  // For each installed skill, check if its name or description appears in the
+  // unit's context tokens (milestone/slice/task titles). Only consider skills
+  // already on the unit-type manifest allowlist — this keeps the heuristic
+  // narrow and avoids wildly off-topic activations.
+  // Users who set `skill_discovery: "off"` or "suggest" do not get
+  // auto-matched skills (the recommendations block still surfaces manifest
+  // skills passively); only "auto" actually adds them to the activation
+  // directive set. Default `skill_discovery` is "suggest", so this is opt-in.
+  if ((prefs?.skill_discovery ?? "suggest") === "auto") {
+    const manifestAllow = resolveSkillManifest(params.unitType);
+    const allowSet = manifestAllow ? new Set(manifestAllow) : null;
+    for (const skill of visibleSkills) {
+      const normalized = normalizeSkillReference(skill.name);
+      if (matched.has(normalized) || avoided.has(normalized)) continue;
+      // Respect the manifest allowlist when present; wildcard (null) lets all
+      // installed skills compete for keyword match.
+      if (allowSet && !allowSet.has(normalized)) continue;
+      if (skillMatchesContext(skill, contextTokens)) {
+        matched.add(normalized);
+      }
+    }
+  }
+
   const ordered = [...matched]
     .filter(name => installedNames.has(name) && !avoided.has(name))
     .sort();
-  return formatSkillActivationBlock(ordered);
+  const activationBlock = formatSkillActivationBlock(ordered);
+
+  // Manifest-driven recommendations (additive, does not override explicit intent).
+  // Only surface skills the manifest declares for this unit type that are
+  // installed and not already in matched/avoided.
+  const matchedSet = new Set(ordered);
+  const manifestList = resolveSkillManifest(params.unitType);
+  const recommendations = (manifestList ?? [])
+    .filter(name => installedNames.has(name) && !avoided.has(name) && !matchedSet.has(name))
+    .sort();
+  const recommendationsBlock = formatSkillRecommendationsBlock(params.unitType, recommendations);
+
+  if (!activationBlock && !recommendationsBlock) return "";
+  if (!activationBlock) return recommendationsBlock;
+  if (!recommendationsBlock) return activationBlock;
+  return `${activationBlock}\n${recommendationsBlock}`;
 }
 
 /**
@@ -1209,6 +1267,7 @@ export async function buildDiscussMilestonePrompt(
   const discussTemplates = inlineTemplate("context", "Context");
 
   const basePrompt = loadPrompt("guided-discuss-milestone", {
+    workingDirectory: base,
     milestoneId: mid,
     milestoneTitle: midTitle,
     inlinedTemplates: discussTemplates,
@@ -2587,6 +2646,7 @@ export async function buildParallelResearchSlicesPrompt(
   }
 
   return loadPrompt("parallel-research-slices", {
+    workingDirectory: basePath,
     mid,
     midTitle,
     sliceCount: String(slices.length),
@@ -2623,12 +2683,15 @@ export async function buildGateEvaluatePrompt(
 
   const subagentSections: string[] = [];
   const gateListLines: string[] = [];
+  const normalizedBase = base.replaceAll("\\", "/");
 
   for (const def of gateDefs) {
     gateListLines.push(`- **${def.id}**: ${def.question}`);
 
     const subPrompt = [
       `You are evaluating quality gate **${def.id}** for slice ${sid} (${sTitle}).`,
+      "",
+      `**Working directory:** \`${normalizedBase}\`. All file reads, writes, and shell commands MUST operate relative to this directory. Do NOT \`cd\` to any other directory.`,
       "",
       `## Question: ${def.question}`,
       "",
@@ -2746,6 +2809,7 @@ export async function buildRewriteDocsPrompt(
   const documentList = docList.length > 0 ? docList.join("\n") : "- No active plan documents found.";
 
   return loadPrompt("rewrite-docs", {
+    workingDirectory: base,
     milestoneId: mid,
     milestoneTitle: midTitle,
     sliceId: sid ?? "none",

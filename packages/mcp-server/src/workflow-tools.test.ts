@@ -1685,6 +1685,58 @@ describe("validateProjectDir", () => {
     }
   });
 
+  it("accepts a worktree under the allowed root external .gsd state target", () => {
+    const allowedRoot = makeTmpBase();
+    const externalState = makeTmpBase();
+    const worktree = join(externalState, "worktrees", "M001");
+    mkdirSync(worktree, { recursive: true });
+    rmSync(join(allowedRoot, ".gsd"), { recursive: true, force: true });
+    symlinkSync(externalState, join(allowedRoot, ".gsd"), "dir");
+
+    const prevRoot = process.env.GSD_WORKFLOW_PROJECT_ROOT;
+    try {
+      process.env.GSD_WORKFLOW_PROJECT_ROOT = allowedRoot;
+      const result = validateProjectDir(worktree);
+      assert.equal(result, realpathSync(worktree));
+    } finally {
+      if (prevRoot === undefined) {
+        delete process.env.GSD_WORKFLOW_PROJECT_ROOT;
+      } else {
+        process.env.GSD_WORKFLOW_PROJECT_ROOT = prevRoot;
+      }
+      cleanup(allowedRoot);
+      cleanup(externalState);
+    }
+  });
+
+  it("rejects external-state sibling paths that only share a prefix", () => {
+    const allowedRoot = makeTmpBase();
+    const externalState = makeTmpBase();
+    const sibling = `${externalState}-sibling`;
+    const siblingWorktree = join(sibling, "worktrees", "M001");
+    mkdirSync(siblingWorktree, { recursive: true });
+    rmSync(join(allowedRoot, ".gsd"), { recursive: true, force: true });
+    symlinkSync(externalState, join(allowedRoot, ".gsd"), "dir");
+
+    const prevRoot = process.env.GSD_WORKFLOW_PROJECT_ROOT;
+    try {
+      process.env.GSD_WORKFLOW_PROJECT_ROOT = allowedRoot;
+      assert.throws(
+        () => validateProjectDir(siblingWorktree),
+        /configured workflow project root/,
+      );
+    } finally {
+      if (prevRoot === undefined) {
+        delete process.env.GSD_WORKFLOW_PROJECT_ROOT;
+      } else {
+        process.env.GSD_WORKFLOW_PROJECT_ROOT = prevRoot;
+      }
+      cleanup(allowedRoot);
+      cleanup(externalState);
+      cleanup(sibling);
+    }
+  });
+
   it("rejects relative paths", () => {
     assert.throws(
       () => validateProjectDir("relative/path"),

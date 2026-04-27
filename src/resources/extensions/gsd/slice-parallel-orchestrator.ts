@@ -82,6 +82,7 @@ let sliceState: SliceOrchestratorState | null = null;
 
 const SLICE_ORCHESTRATOR_STATE_FILE = "slice-orchestrator.json";
 const TMP_SUFFIX = ".tmp";
+export const SLICE_WORKER_AUTO_ARGS = ["headless", "--json", "auto"] as const;
 
 interface PersistedSliceWorker {
   milestoneId: string;
@@ -356,7 +357,7 @@ export function getSliceOrchestratorState(): SliceOrchestratorState | null {
 /**
  * Start parallel execution for eligible slices within a milestone.
  *
- * For each eligible slice: create a worktree, spawn `gsd --mode json --print "/gsd auto"`
+ * For each eligible slice: create a worktree, spawn `gsd headless --json auto`
  * with env GSD_SLICE_LOCK=<SID> + GSD_MILESTONE_LOCK=<MID> + GSD_PARALLEL_WORKER=1.
  */
 export async function startSliceParallel(
@@ -598,8 +599,13 @@ function resolveGsdBin(): string | null {
 
 /**
  * Spawn a worker process for a slice.
- * The worker runs `gsd --mode json --print "/gsd auto"` in the slice's worktree
+ * The worker runs `gsd headless --json auto` in the slice's worktree
  * with GSD_SLICE_LOCK, GSD_MILESTONE_LOCK, and GSD_PARALLEL_WORKER set.
+ *
+ * Print-mode slash commands return after the command handler schedules
+ * auto-mode, so the worker process can exit before doing any LLM work. The
+ * headless auto entrypoint keeps the process alive until auto-mode reaches a
+ * terminal notification, matching milestone-level parallel workers.
  */
 function spawnSliceWorker(
   basePath: string,
@@ -616,7 +622,7 @@ function spawnSliceWorker(
 
   let child: ChildProcess;
   try {
-    child = spawn(process.execPath, [binPath, "--mode", "json", "--print", "/gsd auto"], {
+    child = spawn(process.execPath, [binPath, ...SLICE_WORKER_AUTO_ARGS], {
       cwd: worker.worktreePath,
       env: {
         ...process.env,

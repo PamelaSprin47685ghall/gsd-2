@@ -46,6 +46,11 @@ import {
   resolveGitHeadPath,
   nudgeGitBranchCache,
 } from "./worktree.js";
+import {
+  isGsdWorktreePath,
+  normalizeWorktreePathForCompare,
+  resolveWorktreeProjectRoot,
+} from "./worktree-root.js";
 import { MergeConflictError, readIntegrationBranch, RUNTIME_EXCLUSION_PATHS } from "./git-service.js";
 import { debugLog } from "./debug-logger.js";
 import { logWarning, logError } from "./workflow-logger.js";
@@ -990,6 +995,12 @@ export function autoWorktreeBranch(milestoneId: string): string {
   return `milestone/${milestoneId}`;
 }
 
+function normalizeLocalBranchRef(branch: string): string {
+  return branch.startsWith("refs/heads/")
+    ? branch.slice("refs/heads/".length)
+    : branch;
+}
+
 // ─── Branch-mode Entry ─────────────────────────────────────────────────────
 
 /**
@@ -1196,6 +1207,8 @@ export function createAutoWorktree(
   basePath: string,
   milestoneId: string,
 ): string {
+  basePath = resolveWorktreeProjectRoot(basePath);
+
   // Check if repo has commits — git worktree requires a valid HEAD
   try {
     execFileSync("git", ["rev-parse", "--verify", "HEAD"], { cwd: basePath, stdio: "pipe" });
@@ -1355,6 +1368,8 @@ export function teardownAutoWorktree(
   milestoneId: string,
   opts: { preserveBranch?: boolean } = {},
 ): void {
+  originalBasePath = resolveWorktreeProjectRoot(originalBasePath);
+
   const branch = autoWorktreeBranch(milestoneId);
   const { preserveBranch = false } = opts;
   const previousCwd = process.cwd();
@@ -1406,16 +1421,28 @@ export function teardownAutoWorktree(
 
 /**
  * Detect if the process is currently inside an auto-worktree.
- * Checks both module state and git branch prefix.
+ * Uses the current directory structure plus git branch prefix so detection
+ * still works after process restart when module state has been reset.
  */
 export function isInAutoWorktree(basePath: string): boolean {
-  if (!originalBase) return false;
   const cwd = process.cwd();
-  const resolvedBase = existsSync(basePath) ? realpathSync(basePath) : basePath;
-  const wtDir = join(resolvedBase, ".gsd", "worktrees");
-  if (!cwd.startsWith(wtDir)) return false;
-  const branch = nativeGetCurrentBranch(cwd);
-  return branch.startsWith("milestone/");
+  if (!isGsdWorktreePath(cwd)) return false;
+
+  const projectRoot = resolveWorktreeProjectRoot(basePath, originalBase);
+  const cwdProjectRoot = resolveWorktreeProjectRoot(cwd, originalBase);
+  if (
+    normalizeWorktreePathForCompare(projectRoot) !==
+    normalizeWorktreePathForCompare(cwdProjectRoot)
+  ) {
+    return false;
+  }
+
+  try {
+    const branch = nativeGetCurrentBranch(cwd);
+    return branch.startsWith("milestone/");
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1430,6 +1457,8 @@ export function getAutoWorktreePath(
   basePath: string,
   milestoneId: string,
 ): string | null {
+  basePath = resolveWorktreeProjectRoot(basePath);
+
   const p = worktreePath(basePath, milestoneId);
   if (!existsSync(p)) return null;
 
@@ -1458,6 +1487,8 @@ export function enterAutoWorktree(
   basePath: string,
   milestoneId: string,
 ): string {
+  basePath = resolveWorktreeProjectRoot(basePath);
+
   const p = worktreePath(basePath, milestoneId);
   if (!existsSync(p)) {
     throw new GSDError(
@@ -1514,6 +1545,10 @@ export function getAutoWorktreeOriginalBase(): string | null {
   return originalBase;
 }
 
+export function _resetAutoWorktreeOriginalBaseForTests(): void {
+  originalBase = null;
+}
+
 export function getActiveAutoWorktreeContext(): {
   originalBase: string;
   worktreeName: string;
@@ -1521,11 +1556,14 @@ export function getActiveAutoWorktreeContext(): {
 } | null {
   if (!originalBase) return null;
   const cwd = process.cwd();
-  const resolvedBase = existsSync(originalBase)
-    ? realpathSync(originalBase)
-    : originalBase;
-  const wtDir = join(resolvedBase, ".gsd", "worktrees");
-  if (!cwd.startsWith(wtDir)) return null;
+  if (!isGsdWorktreePath(cwd)) return null;
+  const cwdProjectRoot = resolveWorktreeProjectRoot(cwd, originalBase);
+  if (
+    normalizeWorktreePathForCompare(cwdProjectRoot) !==
+    normalizeWorktreePathForCompare(originalBase)
+  ) {
+    return null;
+  }
   const worktreeName = detectWorktreeName(cwd);
   if (!worktreeName) return null;
   const branch = nativeGetCurrentBranch(cwd);
@@ -1646,6 +1684,10 @@ export function mergeMilestoneToMain(
   }
 
   // 3. chdir to original base
+  // Note: previousCwd captures the cwd at this point — i.e. the worktree cwd
+  // entering the function. Subsequent throws restore to previousCwd, leaving
+  // the caller in worktree-cwd; callers (worktree-resolver) are responsible
+  // for any further cwd movement on the error path.
   const previousCwd = process.cwd();
   process.chdir(originalBasePath_);
 
@@ -1665,6 +1707,24 @@ export function mergeMilestoneToMain(
     : undefined;
   const mainBranch =
     integrationBranch ?? validatedPrefBranch ?? nativeDetectMainBranch(originalBasePath_);
+
+  // Fail closed when the resolved integration branch is the milestone branch
+  // itself (#5024). Stale or corrupt metadata (e.g. integrationBranch recorded
+  // as "milestone/<MID>") would otherwise let the squash merge resolve to a
+  // self-merge: nothing-to-commit + empty self-diff in the post-merge safety
+  // check (#1792) collapse to a false success, and the worktree-resolver
+  // emits worktree-merged for work that never landed on a distinct
+  // integration branch.
+  if (normalizeLocalBranchRef(mainBranch) === milestoneBranch) {
+    process.chdir(previousCwd);
+    throw new GSDError(
+      GSD_GIT_ERROR,
+      `Resolved integration branch "${mainBranch}" is the same ref as milestone branch ` +
+      `"${milestoneBranch}" — refusing to self-merge. Integration branch metadata is invalid; ` +
+      `set a distinct main_branch in GSD preferences or repair the milestone integration record ` +
+      `before retrying milestone completion.`,
+    );
+  }
 
   // Remove transient project-root state files before any branch or merge
   // operation. Untracked milestone metadata can otherwise block squash merges.

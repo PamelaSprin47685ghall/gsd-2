@@ -16,6 +16,16 @@ Start with what the excerpts give you. Read full files when the section heads si
 
 **On-demand Read ordering:** Complete all slice SUMMARY Reads you need for cross-slice synthesis, the Decision Re-evaluation table, and LEARNINGS **before** calling `gsd_complete_milestone` (step 10). Once that tool runs, the milestone is marked complete in the DB — running out of tool budget between step 10 and the LEARNINGS write (step 12) leaves the milestone committed without its LEARNINGS artifact.
 
+### Delegate Review Work
+
+This unit runs under the `planning-dispatch` tools-policy: you may use the `subagent` tool to delegate review work that benefits from a fresh context window. For non-trivial milestones, delegate before drafting LEARNINGS:
+
+- **Cross-slice integrations or new public APIs** → dispatch the **reviewer** agent with the milestone diff and roadmap; treat its findings as input to your Decision Re-evaluation and LEARNINGS sections.
+- **Touched auth, network, parsing, file IO, shell exec, or crypto** → dispatch the **security** agent for an OWASP-style audit across the merged slices.
+- **Significant test surface added or changed** → dispatch the **tester** agent to assess coverage gaps relative to the milestone success criteria.
+
+Subagents read the diff and report findings — they do **not** write user source. Apply their feedback into the milestone summary and any captured decisions before calling `gsd_complete_milestone`.
+
 {{inlinedContext}}
 
 Then:

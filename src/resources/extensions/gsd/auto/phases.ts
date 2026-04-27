@@ -26,6 +26,7 @@ import {
 import { detectStuck } from "./detect-stuck.js";
 import { runUnit } from "./run-unit.js";
 import { debugLog } from "../debug-logger.js";
+import { resolveWorktreeProjectRoot } from "../worktree-root.js";
 import { PROJECT_FILES, hasProjectFileInAncestor } from "../detection.js";
 import { MergeConflictError } from "../git-service.js";
 import { setCurrentPhase, clearCurrentPhase } from "../../shared/gsd-phase-state.js";
@@ -81,11 +82,7 @@ export function resetSessionTimeoutState(): void {
  * Exported for testing as _resolveReportBasePath.
  */
 export function _resolveReportBasePath(s: Pick<AutoSession, "originalBasePath" | "basePath">): string {
-  // Strip /.gsd/worktrees/ suffix when basePath is itself a worktree path and
-  // originalBasePath is falsy — prevents reports landing in the worktree (#3729).
-  const resolved = s.originalBasePath || s.basePath;
-  const markerIdx = resolved.indexOf("/.gsd/worktrees/");
-  return markerIdx !== -1 ? resolved.slice(0, markerIdx) : resolved;
+  return resolveWorktreeProjectRoot(s.basePath, s.originalBasePath);
 }
 
 /**
@@ -96,12 +93,7 @@ export function _resolveReportBasePath(s: Pick<AutoSession, "originalBasePath" |
 export function _resolveDispatchGuardBasePath(
   s: Pick<AutoSession, "originalBasePath" | "basePath">,
 ): string {
-  // Strip /.gsd/worktrees/ suffix when basePath is itself a worktree path and
-  // originalBasePath is falsy — prevents guard checks running against the
-  // worktree instead of the project root (#3729).
-  const resolved = s.originalBasePath || s.basePath;
-  const markerIdx = resolved.indexOf("/.gsd/worktrees/");
-  return markerIdx !== -1 ? resolved.slice(0, markerIdx) : resolved;
+  return resolveWorktreeProjectRoot(s.basePath, s.originalBasePath);
 }
 
 const PLAN_V2_GATE_PHASES: ReadonlySet<Phase> = new Set([
@@ -1342,7 +1334,7 @@ export async function runUnitPhase(
   iterData: IterationData,
   loopState: LoopState,
   sidecarItem?: SidecarItem,
-): Promise<PhaseResult<{ unitStartedAt: number }>> {
+): Promise<PhaseResult<{ unitStartedAt?: number; requestDispatchedAt?: number }>> {
   const { ctx, pi, s, deps, prefs } = ic;
   const { unitType, unitId, prompt, state, mid } = iterData;
 
@@ -1860,7 +1852,7 @@ export async function runUnitPhase(
         );
         // Fall through to next iteration where dispatch will re-derive
         // and re-dispatch this unit.
-        return { action: "next", data: { unitStartedAt: s.currentUnit?.startedAt } };
+        return { action: "next", data: { unitStartedAt: s.currentUnit?.startedAt, requestDispatchedAt: unitResult.requestDispatchedAt } };
       }
     }
   }
@@ -1924,7 +1916,7 @@ export async function runUnitPhase(
     s.checkpointSha = null;
   }
 
-  return { action: "next", data: { unitStartedAt: s.currentUnit?.startedAt } };
+  return { action: "next", data: { unitStartedAt: s.currentUnit?.startedAt, requestDispatchedAt: unitResult.requestDispatchedAt } };
 }
 
 // ─── runFinalize ──────────────────────────────────────────────────────────────

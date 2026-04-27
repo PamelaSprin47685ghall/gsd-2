@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import type { GSDState } from './resources/extensions/gsd/types.js'
-import { resolveBundledSourceResource } from './bundled-resource-path.js'
+import { resolveBundledGsdExtensionModule } from './bundled-resource-path.js'
 
 const jiti = createJiti(fileURLToPath(import.meta.url), { interopDefault: true, debug: false })
 const { existsSync } = await import('node:fs')
@@ -34,7 +34,8 @@ const { existsSync } = await import('node:fs')
  * #3471 contract can be exercised in tests without spawning a subprocess.
  */
 export function resolveGsdAgentExtensionsDir(env: NodeJS.ProcessEnv = process.env): string {
-  return join(env.GSD_AGENT_DIR || join(homedir(), '.gsd', 'agent'), 'extensions', 'gsd')
+  const agentRoot = env.GSD_AGENT_DIR || join(env.GSD_HOME || join(homedir(), '.gsd'), 'agent')
+  return join(agentRoot, 'extensions', 'gsd')
 }
 
 /**
@@ -49,15 +50,28 @@ export function shouldUseAgentExtensionsDir(opts: {
   const env = opts.env ?? process.env
   const fileExists = opts.fileExists ?? existsSync
   const agentDir = resolveGsdAgentExtensionsDir(env)
-  return { agentDir, useAgentDir: fileExists(join(agentDir, 'state.ts')) }
+  return {
+    agentDir,
+    useAgentDir: fileExists(join(agentDir, 'state.ts')) || fileExists(join(agentDir, 'state.js')),
+  }
 }
 
 const agentExtensionsDir = resolveGsdAgentExtensionsDir()
-const useAgentDir = existsSync(join(agentExtensionsDir, 'state.ts'))
+const { useAgentDir } = shouldUseAgentExtensionsDir({ env: process.env })
 const gsdExtensionPath = (...segments: string[]) =>
   useAgentDir
-    ? join(agentExtensionsDir, ...segments)
-    : resolveBundledSourceResource(import.meta.url, 'extensions', 'gsd', ...segments)
+    ? resolveAgentExtensionModule(agentExtensionsDir, segments)
+    : resolveBundledGsdExtensionModule(import.meta.url, segments.join('/'))
+
+function resolveAgentExtensionModule(agentDir: string, segments: string[]): string {
+  const requested = join(agentDir, ...segments)
+  if (existsSync(requested)) return requested
+  if (segments.length === 1 && segments[0].endsWith('.ts')) {
+    const jsPath = join(agentDir, segments[0].replace(/\.ts$/, '.js'))
+    if (existsSync(jsPath)) return jsPath
+  }
+  return requested
+}
 
 async function loadExtensionModules() {
   const stateModule = await jiti.import(gsdExtensionPath('state.ts'), {}) as any
