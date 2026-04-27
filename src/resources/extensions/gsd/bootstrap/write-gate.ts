@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { minimatch } from "minimatch";
 
 import type { ToolsPolicy } from "../unit-context-manifest.js";
+import { logWarning } from "../workflow-logger.js";
 
 /**
  * Regex matching milestone CONTEXT.md file names in both legacy M001
@@ -547,17 +548,44 @@ const PLANNING_WRITE_TOOLS = new Set(["write", "edit", "multi_edit", "notebook_e
 const PLANNING_SUBAGENT_TOOLS = new Set(["subagent", "task"]);
 
 /**
- * Read-only specialist agents that may be dispatched from
- * `planning-dispatch` units. Implementation-tier agents (worker, refactorer,
- * etc.) are excluded; those belong in execute-task.
+ * Canonical registry for agents that planning-dispatch may consider. Unit
+ * manifests still declare per-unit subsets via ToolsPolicy.allowedSubagents.
  */
-export const ALLOWED_PLANNING_DISPATCH_AGENTS = new Set<string>([
-  "scout",
-  "planner",
-  "reviewer",
-  "security",
-  "tester",
-]);
+const PLANNING_DISPATCH_AGENT_REGISTRY = {
+  scout: { readOnlySpecialist: true },
+  planner: { readOnlySpecialist: true },
+  reviewer: { readOnlySpecialist: true },
+  security: { readOnlySpecialist: true },
+  tester: { readOnlySpecialist: true },
+} as const satisfies Record<string, { readonly readOnlySpecialist: boolean }>;
+
+export const ALLOWED_PLANNING_DISPATCH_AGENTS = new Set<string>(
+  Object.entries(PLANNING_DISPATCH_AGENT_REGISTRY)
+    .filter(([, metadata]) => metadata.readOnlySpecialist)
+    .map(([agentId]) => agentId),
+);
+
+let warnedMissingPlanningDispatchAgentClasses = false;
+
+function isReadOnlySpecialist(agentId: string): boolean {
+  const metadata = PLANNING_DISPATCH_AGENT_REGISTRY[agentId as keyof typeof PLANNING_DISPATCH_AGENT_REGISTRY];
+  return metadata?.readOnlySpecialist === true;
+}
+
+function allowedPlanningDispatchAgentsList(): string {
+  return [...ALLOWED_PLANNING_DISPATCH_AGENTS].join(", ");
+}
+
+function warnMissingPlanningDispatchAgentClasses(unitType: string, mode: string, toolName: string): void {
+  if (warnedMissingPlanningDispatchAgentClasses) return;
+  warnedMissingPlanningDispatchAgentClasses = true;
+  // TODO(#4934): Remove this once all subagent/task callers are verified to forward agent identities.
+  logWarning("intercept", "planning-dispatch subagent call missing agent identities; denying by default", {
+    unitType,
+    mode,
+    toolName,
+  });
+}
 
 /**
  * Read-only / planning-safe tools that any non-"all" mode allows. Mirrors
@@ -620,8 +648,8 @@ function blockReason(unitType: string, mode: string, what: string): string {
  * predicate is a no-op.
  *
  * `agentClasses` is supplied by the tool hook for subagent-shaped calls. If
- * absent or empty, planning-dispatch passes through as a migration shim while
- * callers are updated to forward agent names.
+ * absent or empty, planning-dispatch fails closed so stale callers cannot
+ * silently bypass the agent allowlists.
  */
 export function shouldBlockPlanningUnit(
   toolName: string,
@@ -657,16 +685,24 @@ export function shouldBlockPlanningUnit(
       const allowedSubagents = Array.isArray(policy.allowedSubagents) ? policy.allowedSubagents : [];
       const allowed = new Set(allowedSubagents);
       if (requested.length === 0) {
-        return { block: false };
+        warnMissingPlanningDispatchAgentClasses(unitType, policy.mode, tool);
+        return {
+          block: true,
+          reason: blockReason(
+            unitType,
+            policy.mode,
+            `subagent dispatch missing agent identities for "${tool}"; planning-dispatch requires forwarded agentClasses before dispatch can run`,
+          ),
+        };
       }
-      const globallyDisallowed = requested.find(a => !ALLOWED_PLANNING_DISPATCH_AGENTS.has(a));
+      const globallyDisallowed = requested.find(a => !isReadOnlySpecialist(a));
       if (globallyDisallowed) {
         return {
           block: true,
           reason: blockReason(
             unitType,
             policy.mode,
-            `subagent dispatch of "${globallyDisallowed}" not permitted; only read-only specialists (${[...ALLOWED_PLANNING_DISPATCH_AGENTS].join(", ")}) may be dispatched from planning-dispatch units`,
+            `subagent dispatch of "${globallyDisallowed}" not permitted; only read-only specialists (${allowedPlanningDispatchAgentsList()}) may be dispatched from planning-dispatch units`,
           ),
         };
       }

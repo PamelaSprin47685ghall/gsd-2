@@ -161,12 +161,16 @@ test('planning-dispatch: allows task dispatch (delegated recon/planner during sl
   assert.strictEqual(r.block, false);
 });
 
-test('planning-dispatch: pass-through when no agent classes supplied (migration shim)', () => {
+test('planning-dispatch: blocks when no agent classes supplied (deny-by-default)', () => {
   const r = shouldBlockPlanningUnit('subagent', '', BASE, 'plan-slice', PLANNING_DISPATCH);
-  assert.strictEqual(r.block, false);
+  assert.strictEqual(r.block, true);
+  assert.match(r.reason!, /missing agent identities/);
+  assert.match(r.reason!, /tools-policy "planning-dispatch"/);
 
   const empty = shouldBlockPlanningUnit('subagent', '', BASE, 'plan-slice', PLANNING_DISPATCH, []);
-  assert.strictEqual(empty.block, false);
+  assert.strictEqual(empty.block, true);
+  assert.match(empty.reason!, /missing agent identities/);
+  assert.match(empty.reason!, /tools-policy "planning-dispatch"/);
 });
 
 test('planning-dispatch: allows all globally allowed specialists when listed by policy', () => {
@@ -201,6 +205,7 @@ test('planning-dispatch: blocks globally disallowed agent even if listed by poli
   assert.strictEqual(r.block, true);
   assert.match(r.reason!, /"refactorer"/);
   assert.match(r.reason!, /read-only specialists/);
+  assert.doesNotMatch(r.reason!, /ToolsPolicy\.allowedSubagents|permitted agents for this unit/);
 });
 
 test('planning-dispatch: blocks mixed batch containing a disallowed agent', () => {
@@ -218,6 +223,8 @@ test('planning-dispatch: blocks recon agent under closeout policy', () => {
   const r = shouldBlockPlanningUnit('subagent', '', BASE, 'complete-slice', PLANNING_DISPATCH_REVIEW, ['scout']);
   assert.strictEqual(r.block, true);
   assert.match(r.reason!, /"scout"/);
+  assert.match(r.reason!, /ToolsPolicy\.allowedSubagents|permitted agents for this unit/);
+  assert.doesNotMatch(r.reason!, /read-only specialists/);
 });
 
 test('planning-dispatch: still blocks writes to user source (write isolation preserved)', () => {
