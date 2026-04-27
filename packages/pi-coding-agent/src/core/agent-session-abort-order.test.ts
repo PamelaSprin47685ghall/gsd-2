@@ -109,10 +109,15 @@ describe("#4243 — abort() must run before _disconnectFromAgent()", () => {
 	it("newSession() waits instead of aborting while agent_end handlers are still running", async () => {
 		const session = await createSession();
 		const order: string[] = [];
+		let releaseIdle!: () => void;
+		const idle = new Promise<void>((resolve) => {
+			releaseIdle = resolve;
+		});
 
 		(session as any)._processingAgentEnd = true;
-		(session as any).agent.waitForIdle = async () => {
+		(session as any).agent.waitForIdle = () => {
 			order.push("waitForIdle");
+			return idle;
 		};
 		(session as any).abort = async () => {
 			order.push("abort");
@@ -123,9 +128,37 @@ describe("#4243 — abort() must run before _disconnectFromAgent()", () => {
 			originalDisconnect();
 		};
 
-		const ok = await session.newSession();
+		const pendingNewSession = session.newSession();
+		assert.deepEqual(order, ["waitForIdle"]);
+
+		releaseIdle();
+		const ok = await pendingNewSession;
 		assert.equal(ok, true);
 		assert.deepEqual(order, ["waitForIdle", "_disconnectFromAgent"]);
+		assert.equal(order.includes("abort"), false);
+	});
+
+	it("abort() marks synthetic agent_end processing while extension handlers run", async () => {
+		const session = await createSession();
+		const observedProcessingStates: boolean[] = [];
+
+		(session as any).agent.abort = () => {};
+		(session as any).agent.waitForIdle = async () => {};
+		(session as any)._extensionRunner = {
+			emit: async (event: any) => {
+				if (event.type === "agent_end") {
+					observedProcessingStates.push((session as any)._processingAgentEnd);
+				}
+			},
+			emitStop: async () => {
+				observedProcessingStates.push((session as any)._processingAgentEnd);
+			},
+		};
+
+		await session.abort();
+
+		assert.deepEqual(observedProcessingStates, [true, true]);
+		assert.equal((session as any)._processingAgentEnd, false);
 	});
 
 	it("newSession() during agent_end preserves the previous session for resume", async () => {
@@ -170,6 +203,77 @@ describe("#4243 — abort() must run before _disconnectFromAgent()", () => {
 			.filter((part: any) => part.type === "text")
 			.map((part: any) => part.text);
 		assert.deepEqual(restoredText, ["persisted prompt", "persisted response"]);
+	});
+
+	it("switchSession() waits instead of aborting while agent_end handlers are still running", async () => {
+		const session = await createSession({ persistSessions: true });
+		const previousSessionFile = session.sessionFile;
+		assert.ok(previousSessionFile, "need a persisted session file");
+
+		session.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "switch persisted prompt" }],
+		} as any);
+		session.sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "switch persisted response" }],
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				total: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		} as any);
+		session.agent.replaceMessages(session.sessionManager.buildSessionContext().messages);
+
+		const ok = await session.newSession();
+		assert.equal(ok, true);
+		const activeSessionFile = session.sessionFile;
+		assert.ok(activeSessionFile, "need an active session file");
+		assert.notEqual(activeSessionFile, previousSessionFile);
+		assert.deepEqual(session.messages, []);
+
+		const order: string[] = [];
+		let releaseIdle!: () => void;
+		const idle = new Promise<void>((resolve) => {
+			releaseIdle = resolve;
+		});
+
+		(session as any)._processingAgentEnd = true;
+		(session as any).agent.waitForIdle = () => {
+			order.push("waitForIdle");
+			return idle;
+		};
+		(session as any).abort = async () => {
+			order.push("abort");
+		};
+		const originalDisconnect = (session as any)._disconnectFromAgent.bind(session);
+		(session as any)._disconnectFromAgent = () => {
+			order.push("_disconnectFromAgent");
+			originalDisconnect();
+		};
+
+		const pendingSwitch = session.switchSession(previousSessionFile);
+		assert.deepEqual(order, ["waitForIdle"]);
+		assert.equal(session.sessionFile, activeSessionFile);
+		assert.deepEqual(session.messages, []);
+
+		releaseIdle();
+		const switched = await pendingSwitch;
+		assert.equal(switched, true);
+		assert.deepEqual(order, ["waitForIdle", "_disconnectFromAgent"]);
+		assert.equal(order.includes("abort"), false);
+		assert.equal(session.sessionFile, previousSessionFile);
+
+		const restoredText = session.messages
+			.flatMap((message: any) => message.content ?? [])
+			.filter((part: any) => part.type === "text")
+			.map((part: any) => part.text);
+		assert.deepEqual(restoredText, ["switch persisted prompt", "switch persisted response"]);
 	});
 
 	it("switchSession() invokes abort() before _disconnectFromAgent()", async () => {

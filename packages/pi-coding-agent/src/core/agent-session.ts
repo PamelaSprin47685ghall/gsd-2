@@ -1552,21 +1552,27 @@ export class AgentSession {
 		// between tool execution and response processing. Also fire Stop so
 		// Layer 0 hooks see a consistent view of session quiescence.
 		if (!this.isStreaming && this._extensionRunner) {
-			const messages = this.agent.state.messages;
-			await this._extensionRunner.emit({
-				type: "agent_end",
-				messages,
-			});
-			const last = messages[messages.length - 1];
-			const stopReason: "completed" | "cancelled" | "error" | "blocked" =
-				last?.role === "assistant"
-					? last.stopReason === "aborted"
-						? "cancelled"
-						: last.stopReason === "error"
-							? "error"
-							: "completed"
-					: "cancelled";
-			await this._extensionRunner.emitStop({ reason: stopReason, lastMessage: last });
+			const wasProcessingAgentEnd = this._processingAgentEnd;
+			this._processingAgentEnd = true;
+			try {
+				const messages = this.agent.state.messages;
+				await this._extensionRunner.emit({
+					type: "agent_end",
+					messages,
+				});
+				const last = messages[messages.length - 1];
+				const stopReason: "completed" | "cancelled" | "error" | "blocked" =
+					last?.role === "assistant"
+						? last.stopReason === "aborted"
+							? "cancelled"
+							: last.stopReason === "error"
+								? "error"
+								: "completed"
+						: "cancelled";
+				await this._extensionRunner.emitStop({ reason: stopReason, lastMessage: last });
+			} finally {
+				this._processingAgentEnd = wasProcessingAgentEnd;
+			}
 		}
 	}
 
