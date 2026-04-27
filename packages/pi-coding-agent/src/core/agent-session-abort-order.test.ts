@@ -77,6 +77,38 @@ function recordCallOrder<O extends object>(
 	return order;
 }
 
+function makeAssistantMessage(text: string) {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text }],
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			total: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	} as any;
+}
+
+function installAgentEndSessionTransition(
+	session: AgentSession,
+	transition: () => Promise<unknown>,
+): void {
+	(session as any)._extensionRunner = {
+		hasHandlers: () => false,
+		emit: async (event: any) => {
+			if (event.type === "agent_end") {
+				await transition();
+			}
+		},
+		emitStop: async () => {},
+	};
+}
+
 describe("#4243 — abort() must run before _disconnectFromAgent()", () => {
 	beforeEach(() => {
 		testDir = mkdtempSync(join(tmpdir(), "agent-session-abort-"));
@@ -304,6 +336,66 @@ describe("#4243 — abort() must run before _disconnectFromAgent()", () => {
 			.filter((part: any) => part.type === "text")
 			.map((part: any) => part.text);
 		assert.deepEqual(restoredText, ["switch persisted prompt", "switch persisted response"]);
+	});
+
+	it("newSession() during agent_end skips stale post-handlers after the transition starts", async () => {
+		const session = await createSession();
+		const assistantMessage = makeAssistantMessage("old response");
+		let compactionChecks = 0;
+		let listenerAgentEnds = 0;
+
+		(session as any)._lastAssistantMessage = assistantMessage;
+		(session as any)._compactionOrchestrator.checkCompaction = async () => {
+			compactionChecks++;
+		};
+		session.subscribe((event: any) => {
+			if (event.type === "agent_end") listenerAgentEnds++;
+		});
+		installAgentEndSessionTransition(session, () => session.newSession());
+
+		await (session as any)._processAgentEvent({
+			type: "agent_end",
+			messages: [assistantMessage],
+		});
+
+		assert.equal(compactionChecks, 0);
+		assert.equal(listenerAgentEnds, 0);
+		assert.equal((session as any)._lastAssistantMessage, undefined);
+		assert.equal((session as any)._sessionTransitionStartedDuringAgentEnd, false);
+	});
+
+	it("switchSession() during agent_end skips stale post-handlers after the transition starts", async () => {
+		const session = await createSession({ persistSessions: true });
+		const previousSessionFile = session.sessionFile;
+		assert.ok(previousSessionFile, "need a persisted session file");
+
+		const ok = await session.newSession();
+		assert.equal(ok, true);
+		assert.notEqual(session.sessionFile, previousSessionFile);
+
+		const assistantMessage = makeAssistantMessage("old switch response");
+		let compactionChecks = 0;
+		let listenerAgentEnds = 0;
+
+		(session as any)._lastAssistantMessage = assistantMessage;
+		(session as any)._compactionOrchestrator.checkCompaction = async () => {
+			compactionChecks++;
+		};
+		session.subscribe((event: any) => {
+			if (event.type === "agent_end") listenerAgentEnds++;
+		});
+		installAgentEndSessionTransition(session, () => session.switchSession(previousSessionFile));
+
+		await (session as any)._processAgentEvent({
+			type: "agent_end",
+			messages: [assistantMessage],
+		});
+
+		assert.equal(session.sessionFile, previousSessionFile);
+		assert.equal(compactionChecks, 0);
+		assert.equal(listenerAgentEnds, 0);
+		assert.equal((session as any)._lastAssistantMessage, undefined);
+		assert.equal((session as any)._sessionTransitionStartedDuringAgentEnd, false);
 	});
 
 	it("switchSession() invokes abort() before _disconnectFromAgent()", async () => {

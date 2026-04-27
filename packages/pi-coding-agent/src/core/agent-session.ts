@@ -273,6 +273,8 @@ export class AgentSession {
 	private _extensionRunner: ExtensionRunner | undefined = undefined;
 	private _turnIndex = 0;
 	private _processingAgentEnd = false;
+	private _processingQueuedAgentEnd = false;
+	private _sessionTransitionStartedDuringAgentEnd = false;
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
@@ -434,7 +436,23 @@ export class AgentSession {
 		}
 
 		// Emit to extensions first
-		await this._emitExtensionEvent(event);
+		let skipAgentEndPostHandlers = false;
+		if (event.type === "agent_end") {
+			this._processingQueuedAgentEnd = true;
+			try {
+				await this._emitExtensionEvent(event);
+			} finally {
+				this._processingQueuedAgentEnd = false;
+				skipAgentEndPostHandlers = this._sessionTransitionStartedDuringAgentEnd;
+				this._sessionTransitionStartedDuringAgentEnd = false;
+			}
+
+			if (skipAgentEndPostHandlers) {
+				return;
+			}
+		} else {
+			await this._emitExtensionEvent(event);
+		}
 
 		// Notify all listeners
 		this._emit(event);
@@ -622,15 +640,16 @@ export class AgentSession {
 
 	/** Emit extension events based on agent events */
 	private async _emitExtensionEvent(event: AgentEvent): Promise<void> {
-		if (!this._extensionRunner) return;
+		const extensionRunner = this._extensionRunner;
+		if (!extensionRunner) return;
 
 		if (event.type === "agent_start") {
 			this._turnIndex = 0;
-			await this._extensionRunner.emit({ type: "agent_start" });
+			await extensionRunner.emit({ type: "agent_start" });
 		} else if (event.type === "agent_end") {
 			this._processingAgentEnd = true;
 			try {
-				await this._extensionRunner.emit({ type: "agent_end", messages: event.messages });
+				await extensionRunner.emit({ type: "agent_end", messages: event.messages });
 				// `stop` fires on true quiescence: the agent cleanly completed and is now
 				// waiting for the user. Use the last assistant message's stopReason to
 				// distinguish clean completion from error/cancellation.
@@ -643,7 +662,7 @@ export class AgentSession {
 								? "error"
 								: "completed"
 						: "completed";
-				await this._extensionRunner.emitStop({ reason: stopReason, lastMessage: last });
+				await extensionRunner.emitStop({ reason: stopReason, lastMessage: last });
 			} finally {
 				this._processingAgentEnd = false;
 			}
@@ -653,7 +672,7 @@ export class AgentSession {
 				turnIndex: this._turnIndex,
 				timestamp: Date.now(),
 			};
-			await this._extensionRunner.emit(extensionEvent);
+			await extensionRunner.emit(extensionEvent);
 		} else if (event.type === "turn_end") {
 			const extensionEvent: TurnEndEvent = {
 				type: "turn_end",
@@ -661,27 +680,27 @@ export class AgentSession {
 				message: event.message,
 				toolResults: event.toolResults,
 			};
-			await this._extensionRunner.emit(extensionEvent);
+			await extensionRunner.emit(extensionEvent);
 			this._turnIndex++;
 		} else if (event.type === "message_start") {
 			const extensionEvent: MessageStartEvent = {
 				type: "message_start",
 				message: event.message,
 			};
-			await this._extensionRunner.emit(extensionEvent);
+			await extensionRunner.emit(extensionEvent);
 		} else if (event.type === "message_update") {
 			const extensionEvent: MessageUpdateEvent = {
 				type: "message_update",
 				message: event.message,
 				assistantMessageEvent: event.assistantMessageEvent,
 			};
-			await this._extensionRunner.emit(extensionEvent);
+			await extensionRunner.emit(extensionEvent);
 		} else if (event.type === "message_end") {
 			const extensionEvent: MessageEndEvent = {
 				type: "message_end",
 				message: event.message,
 			};
-			await this._extensionRunner.emit(extensionEvent);
+			await extensionRunner.emit(extensionEvent);
 		} else if (event.type === "tool_execution_start") {
 			const extensionEvent: ToolExecutionStartEvent = {
 				type: "tool_execution_start",
@@ -689,7 +708,7 @@ export class AgentSession {
 				toolName: event.toolName,
 				args: event.args,
 			};
-			await this._extensionRunner.emit(extensionEvent);
+			await extensionRunner.emit(extensionEvent);
 		} else if (event.type === "tool_execution_update") {
 			const extensionEvent: ToolExecutionUpdateEvent = {
 				type: "tool_execution_update",
@@ -698,7 +717,7 @@ export class AgentSession {
 				args: event.args,
 				partialResult: event.partialResult,
 			};
-			await this._extensionRunner.emit(extensionEvent);
+			await extensionRunner.emit(extensionEvent);
 		} else if (event.type === "tool_execution_end") {
 			const extensionEvent: ToolExecutionEndEvent = {
 				type: "tool_execution_end",
@@ -707,7 +726,7 @@ export class AgentSession {
 				result: event.result,
 				isError: event.isError,
 			};
-			await this._extensionRunner.emit(extensionEvent);
+			await extensionRunner.emit(extensionEvent);
 		}
 	}
 
@@ -1578,11 +1597,16 @@ export class AgentSession {
 
 	private async _settleCurrentTurnForSessionTransition(): Promise<void> {
 		if (this._processingAgentEnd) {
-			// RPC waitForIdle() resolves on the next agent_end event. During
-			// agent_end handlers the current event already fired, so skip the wait
-			// once the agent is already idle.
+			// RPC waitForIdle() waits for the next agent_end event (60s timeout).
+			// During agent_end handlers the agent may already be idle; only wait if
+			// a stream is still in flight to avoid an unnecessary timeout.
 			if (this.isStreaming) {
 				await this.agent.waitForIdle();
+			}
+
+			if (this._processingQueuedAgentEnd) {
+				this._sessionTransitionStartedDuringAgentEnd = true;
+				this._lastAssistantMessage = undefined;
 			}
 			return;
 		}
