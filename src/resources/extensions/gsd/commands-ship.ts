@@ -101,8 +101,9 @@ export type SliceEvalCheck =
 /**
  * Inspect a single slice's EVAL-REVIEW.md without throwing.
  *
- * One async file read attempt — no `existsSync` precheck (response to PR
- * #4247's TOCTOU finding). ENOENT is treated as `absent`. Other read errors
+ * One async file read attempt — no `existsSync` precheck (defense against the
+ * TOCTOU race that bit prior implementations). ENOENT is treated as `absent`.
+ * Other read errors
  * propagate so callers can decide how to handle them; the {@link handleShip}
  * caller wraps them in a non-blocking warning rather than aborting the
  * ship.
@@ -252,7 +253,7 @@ export async function handleShip(
     return;
   }
 
-  // 2b. Pre-ship soft warning on EVAL-REVIEW.md status (non-blocking — response to #4247).
+  // 2b. Pre-ship soft warning on EVAL-REVIEW.md status (non-blocking).
   for (const sliceId of listSliceIds(basePath, milestoneId)) {
     let result: SliceEvalCheck;
     try {

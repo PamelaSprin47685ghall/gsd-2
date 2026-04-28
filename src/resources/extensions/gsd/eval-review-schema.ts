@@ -4,8 +4,8 @@
  * The auditor agent for `/gsd eval-review` writes a markdown file whose
  * machine-readable contract lives entirely in YAML frontmatter. The body
  * after the closing `---` is human-only prose and is never parsed by any
- * consumer (this is the explicit design response to PR #4247, where regex
- * over LLM-generated prose produced silent failures).
+ * consumer (the design response to a prior parser that used regex over LLM-generated
+ * prose and produced silent failures).
  *
  * This module owns:
  *   - The TypeBox schema for the frontmatter (single source of truth).
@@ -154,8 +154,8 @@ export type ParseResult =
  *   - schema violation → `pointer` is the JSON-Pointer path of the bad field
  *
  * Body content after the closing `---` is never inspected. This is an
- * explicit response to PR #4247, where the previous parser used regex over
- * the body and silently failed on prose / tables / numbered lists.
+ * response to a prior parser that used regex over the body and silently
+ * failed on prose / tables / numbered lists.
  *
  * @param raw - Full contents of an EVAL-REVIEW.md file.
  * @returns A discriminated `ParseResult`.

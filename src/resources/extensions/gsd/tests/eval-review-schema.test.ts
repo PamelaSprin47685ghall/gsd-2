@@ -114,7 +114,7 @@ describe("parseEvalReviewFrontmatter — happy path", () => {
     }
   });
 
-  it("ignores the body content entirely (regression for #4247 — no regex over prose)", () => {
+  it("ignores the body content entirely (body content must not be parsed)", () => {
     const withProseBody = HAPPY_PATH_FRONTMATTER + "\n\n## Gap Analysis\n- some prose bullet that isn't a real gap";
     const result = parseEvalReviewFrontmatter(withProseBody);
     assert.equal(result.ok, true);
@@ -123,13 +123,13 @@ describe("parseEvalReviewFrontmatter — happy path", () => {
     }
   });
 
-  it("ignores tables in the body (regression for #4247)", () => {
+  it("ignores tables in the body (regression: body content must not be parsed)", () => {
     const withTable = HAPPY_PATH_FRONTMATTER + "\n\n| dim | sev |\n|---|---|\n| metrics | major |\n";
     const result = parseEvalReviewFrontmatter(withTable);
     assert.equal(result.ok, true);
   });
 
-  it("ignores numbered lists in the body (regression for #4247)", () => {
+  it("ignores numbered lists in the body (regression: body content must not be parsed)", () => {
     const withNumbered = HAPPY_PATH_FRONTMATTER + "\n\n## Gaps\n1. first numbered\n2. second numbered\n";
     const result = parseEvalReviewFrontmatter(withNumbered);
     assert.equal(result.ok, true);

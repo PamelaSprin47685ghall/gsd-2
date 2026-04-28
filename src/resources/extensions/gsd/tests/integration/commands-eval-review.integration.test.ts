@@ -1,11 +1,11 @@
 /**
- * Integration test for `/gsd eval-review` (issue #5114).
+ * Integration test for `/gsd eval-review` .
  *
  * Walks the helper chain end-to-end (parseArgs → detectState → buildContext
  * → buildPrompt) against a real on-disk slice fixture, then validates the
  * round-trip: a frontmatter that conforms to the schema described in the
  * prompt body must parse successfully via the schema validator. This is the
- * concrete answer to PR #4247's "no end-to-end proof" finding.
+ * concrete answer to the prior "no end-to-end proof" objection.
  */
 
 import { describe, it, beforeEach, afterEach } from "node:test";
@@ -157,7 +157,7 @@ describe("integration: /gsd eval-review helper chain on a real on-disk slice", (
     assert.ok(prompt.toLowerCase().includes("not present"));
   });
 
-  it("truncates the SUMMARY at MAX_CONTEXT_BYTES and surfaces the truncation note in the prompt (regression for #4247 — prompt-size cap)", async () => {
+  it("truncates the SUMMARY at MAX_CONTEXT_BYTES and surfaces the truncation note in the prompt (regression: prompt-size cap)", async () => {
     rmSync(layout.basePath, { recursive: true, force: true });
     layout = buildLayout({ summaryBytes: MAX_CONTEXT_BYTES + 64 * 1024 });
     process.chdir(layout.basePath);
@@ -178,7 +178,7 @@ describe("integration: /gsd eval-review helper chain on a real on-disk slice", (
 // ─── Round-trip: prompt's described schema → validator ────────────────────────
 
 describe("integration: prompt-schema round-trip", () => {
-  it("synthesizes a frontmatter that matches the prompt's described schema and parses successfully (regression for #4247 — circular contract)", () => {
+  it("synthesizes a frontmatter that matches the prompt's described schema and parses successfully (regression: schema and prompt must not drift)", () => {
     const fakeContext = {
       milestoneId: "M001",
       sliceId: "S07",

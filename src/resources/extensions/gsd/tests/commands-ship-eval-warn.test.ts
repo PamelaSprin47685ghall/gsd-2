@@ -5,7 +5,7 @@
  * `handleShip` for each slice in the active milestone. It must:
  *   - return `absent` on missing file (no exception, no throw)
  *   - tolerate a TOCTOU race where the file is deleted between
- *     resolution and read (regression for #4247 MAJOR)
+ *     resolution and read (regression: prior parser would have crashed on this race)
  *   - report `malformed` on schema-invalid frontmatter (no crash)
  *   - report `ok` with verdict + overall_score on a valid frontmatter
  */
@@ -100,7 +100,7 @@ describe("checkSliceEvalReview", () => {
     }
   });
 
-  it("returns malformed with a JSON-Pointer when verdict is invalid (regression for #4247 MAJOR — no regex over body)", async () => {
+  it("returns malformed with a JSON-Pointer when verdict is invalid (regression: malformed verdicts must not parse silently)", async () => {
     writeEvalReview("S07-EVAL-REVIEW.md", happyFrontmatter({ verdict: "MOSTLY_OK" }));
     const result = await checkSliceEvalReview(basePath, "M001", "S07");
     assert.equal(result.kind, "malformed");
@@ -121,13 +121,13 @@ describe("checkSliceEvalReview", () => {
     assert.equal(result.kind, "malformed");
   });
 
-  it("treats a TOCTOU race (file deleted after resolution but before read) as absent without throwing (regression for #4247 MAJOR — TOCTOU)", async () => {
+  it("treats a TOCTOU race (file deleted after resolution but before read) as absent without throwing (regression: TOCTOU race must surface as absent, not throw)", async () => {
     const path = writeEvalReview("S07-EVAL-REVIEW.md", happyFrontmatter());
     // Warm the directory-listing cache used inside resolveSliceFile so the
     // resolver still sees the file by name on the next call. Then delete the
     // file. The subsequent checkSliceEvalReview call resolves a path that
-    // points to a missing file — exactly the race the closed PR #4247's
-    // existsSync+readFileSync sequence panicked on.
+    // points to a missing file — exactly the race a prior existsSync +
+    // readFileSync sequence panicked on.
     const resolved = resolveSliceFile(basePath, "M001", "S07", "EVAL-REVIEW");
     assert.equal(resolved, path);
     unlinkSync(path);
@@ -135,7 +135,7 @@ describe("checkSliceEvalReview", () => {
     assert.equal(result.kind, "absent");
   });
 
-  it("does NOT trigger a malformed verdict on bodies with prose, tables, or numbered lists (regression for #4247 — body is never parsed)", async () => {
+  it("does NOT trigger a malformed verdict on bodies with prose, tables, or numbered lists (regression: body is never parsed)", async () => {
     const body = [
       "",
       "## Gap Analysis",
