@@ -198,12 +198,18 @@ export function parseEvalReviewFrontmatter(raw: string): ParseResult {
  * LLM emitted in `overall_score`. If the LLM-emitted value disagrees with the
  * recomputed one, the disagreement is logged and the recomputed value wins.
  *
+ * Clamps the result into `[MIN_SCORE, MAX_SCORE]` defensively. Schema-validated
+ * inputs are already in range, but the helper is exported and may be called
+ * from a code path that bypasses the schema (tests, future tools); the clamp
+ * keeps the contract honest in those cases.
+ *
  * @param coverage - integer 0..100 from the auditor's coverage assessment.
  * @param infrastructure - integer 0..100 from the auditor's infra assessment.
  * @returns rounded integer 0..100.
  */
 export function computeOverallScore(coverage: number, infrastructure: number): number {
-  return Math.round(coverage * COVERAGE_WEIGHT + infrastructure * INFRASTRUCTURE_WEIGHT);
+  const raw = Math.round(coverage * COVERAGE_WEIGHT + infrastructure * INFRASTRUCTURE_WEIGHT);
+  return Math.max(MIN_SCORE, Math.min(MAX_SCORE, raw));
 }
 
 /**

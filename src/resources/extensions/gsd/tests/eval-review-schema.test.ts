@@ -242,6 +242,16 @@ describe("computeOverallScore", () => {
     assert.equal(computeOverallScore(0, 0), 0);
     assert.equal(computeOverallScore(100, 100), 100);
   });
+
+  it("clamps out-of-range inputs to MAX_SCORE (defense-in-depth for callers that bypass the schema)", () => {
+    assert.equal(computeOverallScore(150, 200), 100);
+    assert.equal(computeOverallScore(101, 100), 100);
+  });
+
+  it("clamps negative inputs to MIN_SCORE", () => {
+    assert.equal(computeOverallScore(-50, -50), 0);
+    assert.equal(computeOverallScore(-1, 0), 0);
+  });
 });
 
 // ─── deriveCounts ─────────────────────────────────────────────────────────────
