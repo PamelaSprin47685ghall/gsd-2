@@ -208,7 +208,7 @@ function isWorkflowPrefsCaptured(basePath: string): boolean {
  * Returns false in light mode (or when prefs absent) so the milestone
  * rules behave exactly as before.
  */
-function hasPendingDeepStage(prefs: GSDPreferences | undefined, basePath: string): boolean {
+export function hasPendingDeepStage(prefs: GSDPreferences | undefined, basePath: string): boolean {
   if (prefs?.planning_depth !== "deep") return false;
   const root = gsdRoot(basePath);
   // 1. workflow-preferences captured (explicit marker in PREFERENCES.md frontmatter).

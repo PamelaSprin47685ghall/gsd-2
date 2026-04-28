@@ -1609,6 +1609,23 @@ export async function showSmartEntry(
   const planV2GateDecision = runPlanV2Gate(ctx, basePath, state);
   if (planV2GateDecision === "block") return;
 
+  // ── Deep planning mode kickoff ────────────────────────────────────────
+  // When `planning_depth: deep` is set (e.g. via `/gsd new-project --deep`)
+  // and any of the 5 project-level stage gates (workflow-prefs, discuss-
+  // project, discuss-requirements, research-decision, research-project) is
+  // still pending, hand off to the auto-loop so the deep-mode dispatch
+  // rules in auto-dispatch.ts drive the staged interview turn-by-turn.
+  // Light mode and fully-completed deep projects fall through to the
+  // standard wizard below.
+  {
+    const prefs = loadEffectiveGSDPreferences(basePath)?.preferences;
+    const { hasPendingDeepStage } = await import("./auto-dispatch.js");
+    if (hasPendingDeepStage(prefs, basePath)) {
+      startAutoDetached(ctx, pi, basePath, false);
+      return;
+    }
+  }
+
   if (!state.activeMilestone?.id) {
     // Guard: if a discuss session is already in flight, don't re-inject the prompt.
     // Both /gsd and /gsd auto reach this branch when no milestone exists yet.
