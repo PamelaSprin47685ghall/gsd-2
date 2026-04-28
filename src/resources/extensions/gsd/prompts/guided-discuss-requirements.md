@@ -14,7 +14,7 @@ This stage runs ONCE per project, after `discuss-project` and before any milesto
 
 Before your first action, print this banner verbatim in chat:
 
-```
+```text
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  GSD ► REQUIREMENTS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

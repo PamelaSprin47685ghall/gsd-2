@@ -30,6 +30,7 @@ import {
   buildSliceFileName,
 } from "./paths.js";
 import { parseRoadmap } from "./parsers-legacy.js";
+import { validateArtifact } from "./schemas/validate.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { logWarning, logError } from "./workflow-logger.js";
 import { join } from "node:path";
@@ -187,10 +188,14 @@ function hasPendingDeepStage(prefs: GSDPreferences | undefined, basePath: string
   const root = gsdRoot(basePath);
   // 1. workflow-preferences captured (explicit marker in PREFERENCES.md frontmatter).
   if (!isWorkflowPrefsCaptured(basePath)) return true;
-  // 2. PROJECT.md exists.
-  if (!existsSync(join(root, "PROJECT.md"))) return true;
-  // 3. REQUIREMENTS.md exists.
-  if (!existsSync(join(root, "REQUIREMENTS.md"))) return true;
+  // 2. PROJECT.md exists and passes validation.
+  const projectPath = join(root, "PROJECT.md");
+  if (!existsSync(projectPath)) return true;
+  if (!validateArtifact(projectPath, "project").ok) return true;
+  // 3. REQUIREMENTS.md exists and passes validation.
+  const requirementsPath = join(root, "REQUIREMENTS.md");
+  if (!existsSync(requirementsPath)) return true;
+  if (!validateArtifact(requirementsPath, "requirements").ok) return true;
   // 4. research-decision marker exists.
   const decisionPath = join(root, "runtime", "research-decision.json");
   if (!existsSync(decisionPath)) return true;
@@ -574,8 +579,8 @@ export const DISPATCH_RULES: DispatchRule[] = [
     },
   },
   {
-    // Deep mode stage gate: PROJECT.md missing.
-    // Fires only when planning_depth === "deep" and PROJECT.md is missing.
+    // Deep mode stage gate: PROJECT.md missing or invalid.
+    // Fires only when planning_depth === "deep" and PROJECT.md is missing/invalid.
     // Project-level interview must complete before any milestone-level discussion.
     // Light mode (default) skips this rule entirely — falls through to milestone rules.
     name: "deep: pre-planning (no PROJECT) → discuss-project",
@@ -583,7 +588,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
       if (prefs?.planning_depth !== "deep") return null;
       if (state.phase !== "pre-planning" && state.phase !== "needs-discussion") return null;
       const projectPath = join(gsdRoot(basePath), "PROJECT.md");
-      if (existsSync(projectPath)) return null; // PROJECT.md exists — fall through
+      if (existsSync(projectPath) && validateArtifact(projectPath, "project").ok) return null; // PROJECT.md valid — fall through
       return {
         action: "dispatch",
         unitType: "discuss-project",
@@ -593,17 +598,18 @@ export const DISPATCH_RULES: DispatchRule[] = [
     },
   },
   {
-    // Deep mode stage gate: REQUIREMENTS.md missing.
-    // Fires only when planning_depth === "deep", PROJECT.md exists, and REQUIREMENTS.md is missing.
-    // Falls through in light mode or when REQUIREMENTS.md already exists.
+    // Deep mode stage gate: REQUIREMENTS.md missing or invalid.
+    // Fires only when planning_depth === "deep", PROJECT.md is valid, and
+    // REQUIREMENTS.md is missing/invalid.
+    // Falls through in light mode or when REQUIREMENTS.md already exists and is valid.
     name: "deep: pre-planning (no REQUIREMENTS) → discuss-requirements",
     match: async ({ state, basePath, prefs, structuredQuestionsAvailable }) => {
       if (prefs?.planning_depth !== "deep") return null;
       if (state.phase !== "pre-planning" && state.phase !== "needs-discussion") return null;
       const projectPath = join(gsdRoot(basePath), "PROJECT.md");
-      if (!existsSync(projectPath)) return null; // PROJECT.md missing — earlier rule handles
+      if (!existsSync(projectPath) || !validateArtifact(projectPath, "project").ok) return null; // PROJECT.md missing/invalid — earlier rule handles
       const requirementsPath = join(gsdRoot(basePath), "REQUIREMENTS.md");
-      if (existsSync(requirementsPath)) return null; // REQUIREMENTS.md exists — fall through
+      if (existsSync(requirementsPath) && validateArtifact(requirementsPath, "requirements").ok) return null; // REQUIREMENTS.md valid — fall through
       return {
         action: "dispatch",
         unitType: "discuss-requirements",
@@ -678,6 +684,22 @@ export const DISPATCH_RULES: DispatchRule[] = [
         existsSync(join(researchDir, "ARCHITECTURE.md")) &&
         existsSync(join(researchDir, "PITFALLS.md"));
       if (allFilesExist) return null; // already done — fall through
+      // Idempotency guard: one orchestrator owns the project research fan-out
+      // until guided-research-project.md deletes this marker during closeout.
+      const runtimeDir = join(gsdRoot(basePath), "runtime");
+      const inflightMarkerPath = join(runtimeDir, "research-project-inflight");
+      if (existsSync(inflightMarkerPath)) return null; // already in flight — wait
+      mkdirSync(runtimeDir, { recursive: true });
+      try {
+        writeFileSync(
+          inflightMarkerPath,
+          JSON.stringify({ started: new Date().toISOString() }) + "\n",
+          { encoding: "utf-8", flag: "wx" },
+        );
+      } catch (err) {
+        if (err && typeof err === "object" && "code" in err && err.code === "EEXIST") return null;
+        throw err;
+      }
       return {
         action: "dispatch",
         unitType: "research-project",

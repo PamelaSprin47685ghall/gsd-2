@@ -65,8 +65,79 @@ phases:
 ---
 `;
 
+const validProjectMd = [
+  "# Project",
+  "",
+  "## What This Is",
+  "",
+  "A test project.",
+  "",
+  "## Core Value",
+  "",
+  "Reliable dispatch behavior.",
+  "",
+  "## Current State",
+  "",
+  "Tests are exercising deep planning.",
+  "",
+  "## Architecture / Key Patterns",
+  "",
+  "Markdown artifacts drive stage gates.",
+  "",
+  "## Capability Contract",
+  "",
+  "See `.gsd/REQUIREMENTS.md`.",
+  "",
+  "## Milestone Sequence",
+  "",
+  "- [ ] M001: Test - exercise deep planning dispatch",
+  "",
+].join("\n");
+
+const validRequirementsMd = [
+  "# Requirements",
+  "",
+  "## Active",
+  "",
+  "### R001 - Dispatch valid artifacts",
+  "- Class: core-capability",
+  "- Status: active",
+  "- Description: Valid artifacts allow deep-mode dispatch to advance.",
+  "- Why it matters: Stage gates must not stall valid projects.",
+  "- Source: test",
+  "- Primary owning slice: M001/S01",
+  "- Supporting slices: none",
+  "- Validation: unmapped",
+  "- Notes:",
+  "",
+  "## Validated",
+  "",
+  "## Deferred",
+  "",
+  "## Out of Scope",
+  "",
+  "## Traceability",
+  "",
+  "| ID | Class | Status | Primary owner | Supporting | Proof |",
+  "|---|---|---|---|---|---|",
+  "| R001 | core-capability | active | M001/S01 | none | unmapped |",
+  "",
+  "## Coverage Summary",
+  "",
+  "- Active requirements: 1",
+  "",
+].join("\n");
+
 function writePreferences(base: string): void {
   writeFileSync(join(base, ".gsd", "PREFERENCES.md"), capturedPreferencesMd);
+}
+
+function writeValidProject(base: string): void {
+  writeFileSync(join(base, ".gsd", "PROJECT.md"), validProjectMd);
+}
+
+function writeValidRequirements(base: string): void {
+  writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), validRequirementsMd);
 }
 
 // ─── Regression test for B1: rule ordering bug ────────────────────────────
@@ -113,12 +184,43 @@ test("integration: deep mode + prefs captured + no PROJECT.md → discuss-projec
   }
 });
 
-test("integration: deep mode + PROJECT.md + no REQUIREMENTS.md → discuss-requirements", async (t) => {
+test("integration: deep mode + invalid PROJECT.md → discuss-project, not discuss-milestone", async (t) => {
   const base = makeIsolatedBase();
   t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
 
   writePreferences(base);
   writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n");
+
+  const prefs = { planning_depth: "deep" } as GSDPreferences;
+  const result = await resolveDispatch(makeCtx(base, prefs, "needs-discussion"));
+  assert.strictEqual(result.action, "dispatch");
+  if (result.action === "dispatch") {
+    assert.strictEqual(result.unitType, "discuss-project");
+  }
+});
+
+test("integration: deep mode + PROJECT.md + no REQUIREMENTS.md → discuss-requirements", async (t) => {
+  const base = makeIsolatedBase();
+  t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
+
+  writePreferences(base);
+  writeValidProject(base);
+
+  const prefs = { planning_depth: "deep" } as GSDPreferences;
+  const result = await resolveDispatch(makeCtx(base, prefs, "needs-discussion"));
+  assert.strictEqual(result.action, "dispatch");
+  if (result.action === "dispatch") {
+    assert.strictEqual(result.unitType, "discuss-requirements");
+  }
+});
+
+test("integration: deep mode + invalid REQUIREMENTS.md → discuss-requirements, not discuss-milestone", async (t) => {
+  const base = makeIsolatedBase();
+  t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
+
+  writePreferences(base);
+  writeValidProject(base);
+  writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), "# Requirements\n");
 
   const prefs = { planning_depth: "deep" } as GSDPreferences;
   const result = await resolveDispatch(makeCtx(base, prefs, "needs-discussion"));
@@ -133,8 +235,8 @@ test("integration: deep mode + REQUIREMENTS.md + no research-decision → resear
   t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
 
   writePreferences(base);
-  writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n");
-  writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), "# Requirements\n");
+  writeValidProject(base);
+  writeValidRequirements(base);
 
   const prefs = { planning_depth: "deep" } as GSDPreferences;
   const result = await resolveDispatch(makeCtx(base, prefs, "needs-discussion"));
@@ -149,8 +251,8 @@ test("integration: deep mode + decision=research + research files missing → re
   t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
 
   writePreferences(base);
-  writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n");
-  writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), "# Requirements\n");
+  writeValidProject(base);
+  writeValidRequirements(base);
   mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
   writeFileSync(
     join(base, ".gsd", "runtime", "research-decision.json"),
@@ -170,8 +272,8 @@ test("integration: deep mode + decision=skip → falls through to discuss-milest
   t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
 
   writePreferences(base);
-  writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n");
-  writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), "# Requirements\n");
+  writeValidProject(base);
+  writeValidRequirements(base);
   mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
   writeFileSync(
     join(base, ".gsd", "runtime", "research-decision.json"),
@@ -199,8 +301,8 @@ test("integration: deep mode + decision=<garbage> → research-decision (NOT dis
   t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
 
   writePreferences(base);
-  writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n");
-  writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), "# Requirements\n");
+  writeValidProject(base);
+  writeValidRequirements(base);
   mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
   writeFileSync(
     join(base, ".gsd", "runtime", "research-decision.json"),

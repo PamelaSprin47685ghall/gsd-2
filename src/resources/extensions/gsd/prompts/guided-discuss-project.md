@@ -14,7 +14,7 @@ This stage runs ONCE per project, before any milestone-level discussion. It prod
 
 Before your first action, print this banner verbatim in chat:
 
-```
+```text
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  GSD ► QUESTIONING (project)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -12,7 +12,7 @@ This is a **fixed-question** stage. Do NOT do open Socratic interviewing. Ask th
 
 Print this banner verbatim in chat as your first action:
 
-```
+```text
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  GSD ► RESEARCH DECISION
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -58,6 +58,6 @@ Once the answer is captured:
 ## Critical rules
 
 - One question, one turn, write file, done. No follow-ups.
-- Do NOT actually run research in this stage — that's a separate dispatch unit (`research-project-parallel`) that fires only if the decision is `research`.
+- Do NOT actually run research in this stage — that's a separate dispatch unit (`research-project`) that fires only if the decision is `research`.
 - Do NOT call `ask_user_questions` more than once per turn.
 - If the user picks "Other / let me explain" or gives an ambiguous freeform answer, treat it as "research" (the recommended choice) and note the inference in the chat confirmation line.

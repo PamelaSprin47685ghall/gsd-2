@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -22,10 +22,81 @@ const REQUIREMENTS_RULE_NAME = "deep: pre-planning (no REQUIREMENTS) → discuss
 const RESEARCH_DECISION_RULE_NAME = "deep: pre-planning (no research decision) → research-decision";
 const RESEARCH_PROJECT_RULE_NAME = "deep: pre-planning (research approved, files missing) → research-project";
 
+const VALID_PROJECT_MD = [
+  "# Project",
+  "",
+  "## What This Is",
+  "",
+  "A test project.",
+  "",
+  "## Core Value",
+  "",
+  "Reliable dispatch behavior.",
+  "",
+  "## Current State",
+  "",
+  "Tests are exercising deep planning.",
+  "",
+  "## Architecture / Key Patterns",
+  "",
+  "Markdown artifacts drive stage gates.",
+  "",
+  "## Capability Contract",
+  "",
+  "See `.gsd/REQUIREMENTS.md`.",
+  "",
+  "## Milestone Sequence",
+  "",
+  "- [ ] M001: Test - exercise deep planning dispatch",
+  "",
+].join("\n");
+
+const VALID_REQUIREMENTS_MD = [
+  "# Requirements",
+  "",
+  "## Active",
+  "",
+  "### R001 - Dispatch valid artifacts",
+  "- Class: core-capability",
+  "- Status: active",
+  "- Description: Valid artifacts allow deep-mode dispatch to advance.",
+  "- Why it matters: Stage gates must not stall valid projects.",
+  "- Source: test",
+  "- Primary owning slice: M001/S01",
+  "- Supporting slices: none",
+  "- Validation: unmapped",
+  "- Notes:",
+  "",
+  "## Validated",
+  "",
+  "## Deferred",
+  "",
+  "## Out of Scope",
+  "",
+  "## Traceability",
+  "",
+  "| ID | Class | Status | Primary owner | Supporting | Proof |",
+  "|---|---|---|---|---|---|",
+  "| R001 | core-capability | active | M001/S01 | none | unmapped |",
+  "",
+  "## Coverage Summary",
+  "",
+  "- Active requirements: 1",
+  "",
+].join("\n");
+
 function makeIsolatedBase(): string {
   const base = join(tmpdir(), `gsd-deep-planning-${randomUUID()}`);
   mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
   return base;
+}
+
+function writeValidProject(base: string): void {
+  writeFileSync(join(base, ".gsd", "PROJECT.md"), VALID_PROJECT_MD);
+}
+
+function writeValidRequirements(base: string): void {
+  writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), VALID_REQUIREMENTS_MD);
 }
 
 function makeCtx(
@@ -150,14 +221,28 @@ test("Deep mode: discuss-project DOES dispatch when planning_depth is 'deep' and
   }
 });
 
-test("Deep mode: discuss-project does NOT dispatch when PROJECT.md already exists", async (t) => {
+test("Deep mode: discuss-project does NOT dispatch when PROJECT.md already exists and is valid", async (t) => {
+  const base = makeIsolatedBase();
+  t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
+
+  writeValidProject(base);
+  const prefs = { planning_depth: "deep" } as GSDPreferences;
+  const result = await rule(PROJECT_RULE_NAME).match(makeCtx(base, prefs));
+  assert.strictEqual(result, null, "valid PROJECT.md must fall through to next rule");
+});
+
+test("Deep mode: discuss-project DOES dispatch when PROJECT.md exists but is invalid", async (t) => {
   const base = makeIsolatedBase();
   t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
 
   writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n");
   const prefs = { planning_depth: "deep" } as GSDPreferences;
   const result = await rule(PROJECT_RULE_NAME).match(makeCtx(base, prefs));
-  assert.strictEqual(result, null, "PROJECT.md present must fall through to next rule");
+  assert.ok(result && result.action === "dispatch", "invalid PROJECT.md must re-fire discuss-project");
+  if (result.action === "dispatch") {
+    assert.strictEqual(result.unitType, "discuss-project");
+    assert.strictEqual(result.unitId, "PROJECT");
+  }
 });
 
 test("Deep mode: discuss-project does NOT dispatch in non-pre-planning phases", async (t) => {
@@ -201,7 +286,7 @@ test("Deep mode: discuss-requirements DOES dispatch when PROJECT.md exists and R
   const base = makeIsolatedBase();
   t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
 
-  writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n");
+  writeValidProject(base);
   const prefs = { planning_depth: "deep" } as GSDPreferences;
   const result = await rule(REQUIREMENTS_RULE_NAME).match(makeCtx(base, prefs));
   assert.ok(result && result.action === "dispatch", "deep mode + PROJECT.md present + REQUIREMENTS.md missing must dispatch");
@@ -211,15 +296,30 @@ test("Deep mode: discuss-requirements DOES dispatch when PROJECT.md exists and R
   }
 });
 
-test("Deep mode: discuss-requirements does NOT dispatch when REQUIREMENTS.md already exists", async (t) => {
+test("Deep mode: discuss-requirements does NOT dispatch when REQUIREMENTS.md already exists and is valid", async (t) => {
   const base = makeIsolatedBase();
   t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
 
-  writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n");
+  writeValidProject(base);
+  writeValidRequirements(base);
+  const prefs = { planning_depth: "deep" } as GSDPreferences;
+  const result = await rule(REQUIREMENTS_RULE_NAME).match(makeCtx(base, prefs));
+  assert.strictEqual(result, null, "valid REQUIREMENTS.md must fall through");
+});
+
+test("Deep mode: discuss-requirements DOES dispatch when REQUIREMENTS.md exists but is invalid", async (t) => {
+  const base = makeIsolatedBase();
+  t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
+
+  writeValidProject(base);
   writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), "# Requirements\n");
   const prefs = { planning_depth: "deep" } as GSDPreferences;
   const result = await rule(REQUIREMENTS_RULE_NAME).match(makeCtx(base, prefs));
-  assert.strictEqual(result, null, "REQUIREMENTS.md present must fall through");
+  assert.ok(result && result.action === "dispatch", "invalid REQUIREMENTS.md must re-fire discuss-requirements");
+  if (result.action === "dispatch") {
+    assert.strictEqual(result.unitType, "discuss-requirements");
+    assert.strictEqual(result.unitId, "REQUIREMENTS");
+  }
 });
 
 // ─── research-decision rule ───────────────────────────────────────────────
@@ -228,8 +328,8 @@ test("Deep mode: research-decision does NOT dispatch in light mode", async (t) =
   const base = makeIsolatedBase();
   t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
 
-  writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n");
-  writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), "# Requirements\n");
+  writeValidProject(base);
+  writeValidRequirements(base);
   const result = await rule(RESEARCH_DECISION_RULE_NAME).match(makeCtx(base, undefined));
   assert.strictEqual(result, null);
 });
@@ -238,7 +338,7 @@ test("Deep mode: research-decision does NOT dispatch when REQUIREMENTS.md missin
   const base = makeIsolatedBase();
   t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
 
-  writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n");
+  writeValidProject(base);
   // No REQUIREMENTS.md
   const prefs = { planning_depth: "deep" } as GSDPreferences;
   const result = await rule(RESEARCH_DECISION_RULE_NAME).match(makeCtx(base, prefs));
@@ -249,8 +349,8 @@ test("Deep mode: research-decision DOES dispatch when REQUIREMENTS.md exists and
   const base = makeIsolatedBase();
   t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
 
-  writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n");
-  writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), "# Requirements\n");
+  writeValidProject(base);
+  writeValidRequirements(base);
   const prefs = { planning_depth: "deep" } as GSDPreferences;
   const result = await rule(RESEARCH_DECISION_RULE_NAME).match(makeCtx(base, prefs));
   assert.ok(result && result.action === "dispatch");
@@ -264,8 +364,8 @@ test("Deep mode: research-decision does NOT dispatch when decision marker exists
   const base = makeIsolatedBase();
   t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
 
-  writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n");
-  writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), "# Requirements\n");
+  writeValidProject(base);
+  writeValidRequirements(base);
   mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
   writeFileSync(join(base, ".gsd", "runtime", "research-decision.json"), JSON.stringify({ decision: "skip" }));
   const prefs = { planning_depth: "deep" } as GSDPreferences;
@@ -276,8 +376,8 @@ test("Deep mode: research-decision does NOT dispatch when decision marker exists
 // ─── research-project rule ────────────────────────────────────────────────
 
 function setupReadyForResearchProject(base: string): void {
-  writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n");
-  writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), "# Requirements\n");
+  writeValidProject(base);
+  writeValidRequirements(base);
   mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
   writeFileSync(
     join(base, ".gsd", "runtime", "research-decision.json"),
@@ -298,8 +398,8 @@ test("Deep mode: research-project does NOT dispatch when decision marker missing
   const base = makeIsolatedBase();
   t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
 
-  writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n");
-  writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), "# Requirements\n");
+  writeValidProject(base);
+  writeValidRequirements(base);
   // No decision marker
   const prefs = { planning_depth: "deep" } as GSDPreferences;
   const result = await rule(RESEARCH_PROJECT_RULE_NAME).match(makeCtx(base, prefs));
@@ -310,8 +410,8 @@ test("Deep mode: research-project does NOT dispatch when user chose 'skip'", asy
   const base = makeIsolatedBase();
   t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
 
-  writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n");
-  writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), "# Requirements\n");
+  writeValidProject(base);
+  writeValidRequirements(base);
   mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
   writeFileSync(join(base, ".gsd", "runtime", "research-decision.json"), JSON.stringify({ decision: "skip" }));
   const prefs = { planning_depth: "deep" } as GSDPreferences;
@@ -331,6 +431,21 @@ test("Deep mode: research-project DOES dispatch when decision is 'research' and 
     assert.strictEqual(result.unitType, "research-project");
     assert.strictEqual(result.unitId, "RESEARCH-PROJECT");
   }
+  assert.ok(
+    existsSync(join(base, ".gsd", "runtime", "research-project-inflight")),
+    "dispatch must create the in-flight marker before returning",
+  );
+});
+
+test("Deep mode: research-project does NOT dispatch while in-flight marker exists", async (t) => {
+  const base = makeIsolatedBase();
+  t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
+
+  setupReadyForResearchProject(base);
+  writeFileSync(join(base, ".gsd", "runtime", "research-project-inflight"), "{}\n");
+  const prefs = { planning_depth: "deep" } as GSDPreferences;
+  const result = await rule(RESEARCH_PROJECT_RULE_NAME).match(makeCtx(base, prefs));
+  assert.strictEqual(result, null, "in-flight marker must suppress duplicate research-project dispatch");
 });
 
 test("Deep mode: research-project does NOT dispatch when all 4 research files exist", async (t) => {

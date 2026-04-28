@@ -199,62 +199,62 @@ function validateRequirementsContent(
     validateRequirementShape(r, errors, warnings);
   }
 
-  if (projectContent) {
-    const project = parseProject(projectContent);
-    const milestoneIds = new Set(project.milestones.map(m => m.id));
+  const milestoneIds = projectContent
+    ? new Set(parseProject(projectContent).milestones.map(m => m.id))
+    : new Set(Array.from(roadmapsByMilestone.keys()));
+  const canValidateMilestones = projectContent !== null || roadmapsByMilestone.size > 0;
 
-    /**
-     * Validate one "M###/S##" reference (or partial). Pushes an error if
-     * the milestone is missing; pushes a warning if a roadmap is loaded
-     * for the milestone and the slice half is missing.
-     */
-    const checkRef = (
-      requirementId: string,
-      ref: string,
-      field: "primaryOwner" | "supportingSlices",
-    ): void => {
-      // Tolerate the documented "none yet" / "none" sentinels for primaryOwner.
-      if (field === "primaryOwner" && /^(none yet|none)$/.test(ref)) return;
-      // "M###" alone (no slash) is allowed for primaryOwner shape; still want
-      // to check milestone existence.
-      const milestoneOnly = ref.match(/^(M\d{3})$/);
-      if (milestoneOnly) {
-        if (!milestoneIds.has(milestoneOnly[1])) {
-          errors.push(err("dangling-owner", `Requirement ${requirementId} ${field} references non-existent milestone ${milestoneOnly[1]}`, requirementId));
-        }
-        return;
+  /**
+   * Validate one "M###/S##" reference (or partial). Pushes an error if
+   * the milestone is known to be missing; pushes an error if a roadmap is loaded
+   * for the milestone and the slice half is missing.
+   */
+  const checkRef = (
+    requirementId: string,
+    ref: string,
+    field: "primaryOwner" | "supportingSlices",
+  ): void => {
+    // Tolerate the documented "none yet" / "none" sentinels for primaryOwner.
+    if (field === "primaryOwner" && /^(none yet|none)$/.test(ref)) return;
+    // "M###" alone (no slash) is allowed for primaryOwner shape; still want
+    // to check milestone existence when project/roadmap context is available.
+    const milestoneOnly = ref.match(/^(M\d{3})$/);
+    if (milestoneOnly) {
+      if (canValidateMilestones && !milestoneIds.has(milestoneOnly[1])) {
+        errors.push(err("dangling-owner", `Requirement ${requirementId} ${field} references non-existent milestone ${milestoneOnly[1]}`, requirementId));
       }
-      const m = ref.match(/^(M\d{3})\/(S\d{2}|none yet)$/);
-      if (!m) {
-        warnings.push(err("malformed-slice-ref", `Requirement ${requirementId} ${field} value "${ref}" does not match expected M###/S## format`, requirementId));
-        return;
-      }
-      const [, milestoneId, sliceHalf] = m;
-      if (!milestoneIds.has(milestoneId)) {
-        errors.push(err("dangling-owner", `Requirement ${requirementId} ${field} references non-existent milestone ${milestoneId}`, requirementId));
-        return;
-      }
-      // Slice-half cross-ref: only enforced when we have a roadmap for the milestone.
-      if (sliceHalf === "none yet") return;
-      const roadmap = roadmapsByMilestone.get(milestoneId);
-      if (!roadmap) return;
-      const sliceExists = roadmap.slices.some(s => s.id === sliceHalf);
-      if (!sliceExists) {
-        errors.push(err(
-          "dangling-slice-ref",
-          `Requirement ${requirementId} ${field} references slice ${milestoneId}/${sliceHalf} which does not exist in that milestone's roadmap`,
-          requirementId,
-        ));
-      }
-    };
+      return;
+    }
+    const m = ref.match(/^(M\d{3})\/(S\d{2}|none yet)$/);
+    if (!m) {
+      warnings.push(err("malformed-slice-ref", `Requirement ${requirementId} ${field} value "${ref}" does not match expected M###/S## format`, requirementId));
+      return;
+    }
+    const [, milestoneId, sliceHalf] = m;
+    if (canValidateMilestones && !milestoneIds.has(milestoneId)) {
+      errors.push(err("dangling-owner", `Requirement ${requirementId} ${field} references non-existent milestone ${milestoneId}`, requirementId));
+      return;
+    }
+    // Slice-half cross-ref: only enforced when we have a roadmap for the milestone.
+    if (sliceHalf === "none yet") return;
+    const roadmap = roadmapsByMilestone.get(milestoneId);
+    if (!roadmap) return;
+    const sliceExists = roadmap.slices.some(s => s.id === sliceHalf);
+    if (!sliceExists) {
+      errors.push(err(
+        "dangling-slice-ref",
+        `Requirement ${requirementId} ${field} references slice ${milestoneId}/${sliceHalf} which does not exist in that milestone's roadmap`,
+        requirementId,
+      ));
+    }
+  };
 
-    for (const r of parsed.requirements) {
-      // primaryOwner: single reference.
-      if (r.primaryOwner) checkRef(r.id, r.primaryOwner, "primaryOwner");
-      // supportingSlices: comma/space-separated list.
-      for (const ref of parseSliceList(r.supportingSlices)) {
-        checkRef(r.id, ref, "supportingSlices");
-      }
+  for (const r of parsed.requirements) {
+    // primaryOwner: single reference.
+    if (r.primaryOwner) checkRef(r.id, r.primaryOwner, "primaryOwner");
+    // supportingSlices: comma/space-separated list.
+    for (const ref of parseSliceList(r.supportingSlices)) {
+      checkRef(r.id, ref, "supportingSlices");
     }
   }
 
@@ -289,8 +289,8 @@ function validateRequirementShape(r: ParsedRequirement, errors: ValidationError[
     errors.push(err("status-section-mismatch", `Requirement ${r.id} has Status "${r.status}" but lives under "## ${r.parentSection}" (expected "## ${expectedSection}")`, r.id));
   }
 
-  if (r.primaryOwner && !/^(M\d{3}\/(S\d{2}|none yet)|none yet|none)$/.test(r.primaryOwner)) {
-    warnings.push(err("malformed-owner", `Requirement ${r.id} owner "${r.primaryOwner}" does not match expected formats (M###/S## | M###/none yet | none yet | none)`, r.id));
+  if (r.primaryOwner && !/^(M\d{3}(\/(S\d{2}|none yet))?|none yet|none)$/.test(r.primaryOwner)) {
+    warnings.push(err("malformed-owner", `Requirement ${r.id} owner "${r.primaryOwner}" does not match expected formats (M### | M###/S## | M###/none yet | none yet | none)`, r.id));
   }
 }
 

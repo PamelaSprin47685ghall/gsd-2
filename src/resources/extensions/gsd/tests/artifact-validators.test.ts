@@ -359,6 +359,110 @@ See .gsd/REQUIREMENTS.md.
   assert.ok(hasErrorCode(result.errors, "dangling-owner"));
 });
 
+test("Deep mode validator: REQUIREMENTS.md accepts M### primary owner shorthand", (t) => {
+  const base = tempBase();
+  t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
+
+  const reqPath = writeArtifact(base, "REQUIREMENTS.md", [
+    "# Requirements",
+    "",
+    "## Active",
+    "",
+    "### R001 - Milestone-level owner",
+    "- Class: core-capability",
+    "- Status: active",
+    "- Description: Owner is assigned at milestone granularity.",
+    "- Why it matters: Early requirements may not have slices yet.",
+    "- Source: user",
+    "- Primary owning slice: M001",
+    "- Supporting slices: none",
+    "- Validation: unmapped",
+    "- Notes:",
+    "",
+    "## Validated",
+    "",
+    "## Deferred",
+    "",
+    "## Out of Scope",
+    "",
+    "## Traceability",
+    "",
+    "| ID | Class | Status | Primary owner | Supporting | Proof |",
+    "|---|---|---|---|---|---|",
+    "| R001 | core-capability | active | M001 | none | unmapped |",
+    "",
+    "## Coverage Summary",
+    "",
+    "- Active requirements: 1",
+    "",
+  ].join("\n"));
+
+  const result = validateArtifact(reqPath, "requirements");
+  assert.strictEqual(result.ok, true);
+  assert.equal(hasErrorCode(result.warnings, "malformed-owner"), false);
+});
+
+test("Deep mode validator: roadmap-only cross refs catch dangling slice refs", (t) => {
+  const base = tempBase();
+  t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
+
+  const reqPath = writeArtifact(base, "REQUIREMENTS.md", [
+    "# Requirements",
+    "",
+    "## Active",
+    "",
+    "### R001 - Bad slice",
+    "- Class: core-capability",
+    "- Status: active",
+    "- Description: Owner references a missing slice in a known roadmap.",
+    "- Why it matters: Roadmap-only validation should still catch stale links.",
+    "- Source: user",
+    "- Primary owning slice: M001/S99",
+    "- Supporting slices: none",
+    "- Validation: unmapped",
+    "- Notes:",
+    "",
+    "## Validated",
+    "",
+    "## Deferred",
+    "",
+    "## Out of Scope",
+    "",
+    "## Traceability",
+    "",
+    "| ID | Class | Status | Primary owner | Supporting | Proof |",
+    "|---|---|---|---|---|---|",
+    "| R001 | core-capability | active | M001/S99 | none | unmapped |",
+    "",
+    "## Coverage Summary",
+    "",
+    "- Active requirements: 1",
+    "",
+  ].join("\n"));
+
+  const roadmapPath = writeArtifact(base, "M001-ROADMAP.md", [
+    "# Roadmap",
+    "",
+    "## Slices",
+    "",
+    "### S01 - Existing slice",
+    "- Risk: low",
+    "- Depends: none",
+    "- Demo: visible result",
+    "",
+    "## Definition of Done",
+    "",
+    "- Slice is complete",
+    "",
+  ].join("\n"));
+
+  const result = validateArtifact(reqPath, "requirements", {
+    crossRefs: { roadmapPaths: { M001: roadmapPath } },
+  });
+  assert.strictEqual(result.ok, false);
+  assert.ok(hasErrorCode(result.errors, "dangling-slice-ref"));
+});
+
 // ─── ROADMAP.md ─────────────────────────────────────────────────────────
 
 test("Deep mode validator: valid ROADMAP.md fixture passes (without cross-refs)", () => {

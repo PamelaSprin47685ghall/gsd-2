@@ -10,7 +10,7 @@ Run **project-level domain research** in 4 parallel dimensions. Read `.gsd/PROJE
 
 Print this banner verbatim in chat as your first action:
 
-```
+```text
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  GSD ► RESEARCHING (project)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -109,8 +109,9 @@ Prompt:
 Once all 4 tasks return:
 
 1. Verify all 4 files exist: `STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, `PITFALLS.md` in `.gsd/research/`. If any are missing, retry that task once.
-2. Print a concise summary in chat: one sentence per dimension, what each found.
-3. Say exactly: `"Project research complete."` — nothing else.
+2. Delete `.gsd/runtime/research-project-inflight` if it exists — this releases the dispatch-idempotency marker so `/gsd auto` can advance after research completes.
+3. Print a concise summary in chat: one sentence per dimension, what each found.
+4. Say exactly: `"Project research complete."` — nothing else.
 
 ---
 
