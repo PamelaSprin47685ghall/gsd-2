@@ -16,6 +16,7 @@ import type { GSDState, Phase } from "../types.ts";
 import {
   ensurePlanV2Graph,
   hasFinalizedMilestoneContext,
+  isEmptyPlanV2GraphResult,
   isMissingFinalizedContextResult,
 } from "../uok/plan-v2.ts";
 
@@ -228,6 +229,7 @@ test("plan-v2 ensure rejects empty executable graph", () => {
   const compiled = ensurePlanV2Graph(basePath, buildState("executing"));
   assert.equal(compiled.ok, false);
   assert.match(compiled.reason ?? "", /compiled graph is empty/i);
+  assert.equal(isEmptyPlanV2GraphResult(compiled), true);
 });
 
 test("plan-v2 allows empty graph for milestone terminal phases", () => {

@@ -57,7 +57,7 @@ import { getEligibleSlices } from "../slice-parallel-eligibility.js";
 import { startSliceParallel } from "../slice-parallel-orchestrator.js";
 import { isDbAvailable, getMilestoneSlices } from "../gsd-db.js";
 import type { MinimalModelRegistry } from "../context-budget.js";
-import { ensurePlanV2Graph, isMissingFinalizedContextResult } from "../uok/plan-v2.js";
+import { ensurePlanV2Graph, isEmptyPlanV2GraphResult, isMissingFinalizedContextResult } from "../uok/plan-v2.js";
 import { resolveUokFlags } from "../uok/flags.js";
 import { UokGateRunner } from "../uok/gate-runner.js";
 import { resetEvidence, loadEvidenceFromDisk } from "../safety/evidence-collector.js";
@@ -443,7 +443,18 @@ export async function runPreDispatch(
   }
 
   if (uokFlags.planV2 && shouldRunPlanV2Gate(state.phase)) {
-    const compiled = ensurePlanV2Graph(s.basePath, state);
+    let compiled = ensurePlanV2Graph(s.basePath, state);
+    if (isEmptyPlanV2GraphResult(compiled)) {
+      deps.invalidateAllCaches();
+      state = await deps.deriveState(s.basePath);
+      compiled = shouldRunPlanV2Gate(state.phase)
+        ? ensurePlanV2Graph(s.basePath, state)
+        : {
+            ok: true,
+            reason: "empty plan-v2 graph recovered by state rederive",
+            nodeCount: 0,
+          };
+    }
     if (!compiled.ok) {
       const reason = compiled.reason ?? "Plan v2 compilation failed";
       if (isMissingFinalizedContextResult(compiled)) {
