@@ -650,7 +650,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         const prefs = prefsResult?.preferences;
         const { getCollapseCadence, mergeSliceToMain } = await import("./slice-cadence.js");
         if (getCollapseCadence(prefs) !== "slice") return;
-        if (getIsolationMode(s.basePath) !== "worktree") return;
+        if (getIsolationMode(s.originalBasePath || s.basePath) !== "worktree") return;
         if (s.isolationDegraded) return;
 
         const projectRoot = s.originalBasePath || s.basePath;
