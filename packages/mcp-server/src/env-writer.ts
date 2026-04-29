@@ -141,6 +141,29 @@ export function isSafeEnvVarKey(key: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
 }
 
+/**
+ * Keys that influence the MCP server's own runtime — module loading, project
+ * sandbox, CLI resolution. Allowing the LLM to set these via secure_env_collect
+ * would let a misbehaving caller swap the workflow executor module mid-session
+ * (RCE chain) or escape the project sandbox. We refuse to write or hydrate
+ * these keys even when isSafeEnvVarKey() would otherwise accept them.
+ */
+const SECURITY_SENSITIVE_KEYS = new Set<string>([
+  "GSD_WORKFLOW_EXECUTORS_MODULE",
+  "GSD_WORKFLOW_WRITE_GATE_MODULE",
+  "GSD_WORKFLOW_PROJECT_ROOT",
+  "GSD_CLI_PATH",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "PATH",
+  "LD_PRELOAD",
+  "DYLD_INSERT_LIBRARIES",
+]);
+
+export function isSecuritySensitiveEnvKey(key: string): boolean {
+  return SECURITY_SENSITIVE_KEYS.has(key);
+}
+
 export function isSupportedDeploymentEnvironment(env: string): boolean {
   return env === "development" || env === "preview" || env === "production";
 }
@@ -206,10 +229,16 @@ export async function applySecrets(
 
   if (destination === "dotenv") {
     for (const { key, value } of provided) {
+      if (isSecuritySensitiveEnvKey(key)) {
+        errors.push(`${key}: refusing to set MCP server runtime variable via secure_env_collect`);
+        continue;
+      }
       try {
         await writeEnvKey(opts.envFilePath, key, value);
         applied.push(key);
-        // Hydrate process.env so the current session sees the new value
+        // Hydrate process.env so the current session sees the new value.
+        // Sensitive keys are excluded above so a malicious caller cannot
+        // swap our module-loading or sandbox configuration mid-session.
         process.env[key] = value;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -229,18 +258,24 @@ export async function applySecrets(
         errors.push(`${key}: invalid environment variable name`);
         continue;
       }
+      if (isSecuritySensitiveEnvKey(key)) {
+        errors.push(`${key}: refusing to set MCP server runtime variable via secure_env_collect`);
+        continue;
+      }
+      // Pass the secret on stdin for both vercel and convex so the value is
+      // never visible in process arguments (ps / /proc/<pid>/cmdline).
       const cmd = destination === "vercel"
         ? `printf %s ${shellEscapeSingle(value)} | vercel env add ${key} ${env}`
-        : "";
+        : `printf %s ${shellEscapeSingle(value)} | npx convex env set ${key}`;
       try {
-        const result = destination === "vercel"
-          ? await opts.execFn("sh", ["-c", cmd])
-          : await opts.execFn("npx", ["convex", "env", "set", key, value]);
+        const result = await opts.execFn("sh", ["-c", cmd]);
         if (result.code !== 0) {
           errors.push(`${key}: ${result.stderr.slice(0, 200)}`);
         } else {
           applied.push(key);
-          process.env[key] = value;
+          // Do NOT hydrate process.env after pushing to a remote destination:
+          // no in-process reader needs a freshly-pushed remote secret, and
+          // every spawned child would inherit the plaintext value.
         }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);

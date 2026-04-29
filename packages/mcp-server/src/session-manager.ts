@@ -152,8 +152,14 @@ export class SessionManager {
   /**
    * Look up a session by sessionId.
    * Linear scan is fine — we expect <10 concurrent sessions.
+   *
+   * Empty sessionId is rejected explicitly: in-progress sessions carry an
+   * empty sessionId until init() resolves, so an empty-string lookup would
+   * otherwise match the first in-flight session and silently target the
+   * wrong one (e.g. cancel a different caller's session).
    */
   getSession(sessionId: string): ManagedSession | undefined {
+    if (!sessionId) return undefined;
     for (const session of this.sessions.values()) {
       if (session.sessionId === sessionId) return session;
     }

@@ -458,6 +458,7 @@ function getWriteGateModuleCandidates(): string[] {
     if (/^[a-z]{2,}:/i.test(explicitModule) && !explicitModule.startsWith("file:")) {
       throw new Error("GSD_WORKFLOW_WRITE_GATE_MODULE only supports file: URLs or filesystem paths.");
     }
+    warnCustomWorkflowModule("GSD_WORKFLOW_WRITE_GATE_MODULE", explicitModule);
     candidates.push(explicitModule.startsWith("file:") ? explicitModule : toFileUrl(explicitModule));
   }
 
@@ -471,6 +472,24 @@ function getWriteGateModuleCandidates(): string[] {
 
 function toFileUrl(modulePath: string): string {
   return pathToFileURL(resolve(modulePath)).href;
+}
+
+const warnedCustomWorkflowModuleVars = new Set<string>();
+
+/**
+ * Emit a one-time stderr warning when GSD_WORKFLOW_EXECUTORS_MODULE or
+ * GSD_WORKFLOW_WRITE_GATE_MODULE is set. These overrides exist for dev/test
+ * use, but they let the env owner load arbitrary local modules. The warning
+ * makes accidental or hostile use loud rather than silent.
+ */
+function warnCustomWorkflowModule(varName: string, value: string): void {
+  if (warnedCustomWorkflowModuleVars.has(varName)) return;
+  warnedCustomWorkflowModuleVars.add(varName);
+  process.stderr.write(
+    `[gsd-mcp-server] WARNING: ${varName} is set (${value}). ` +
+    `Custom workflow modules will be loaded from this path. ` +
+    `Unset for production use.\n`,
+  );
 }
 
 /** @internal — exported for testing only */
@@ -506,6 +525,7 @@ function getWorkflowExecutorModuleCandidates(env: NodeJS.ProcessEnv = process.en
     if (/^[a-z]{2,}:/i.test(explicitModule) && !explicitModule.startsWith("file:")) {
       throw new Error("GSD_WORKFLOW_EXECUTORS_MODULE only supports file: URLs or filesystem paths.");
     }
+    warnCustomWorkflowModule("GSD_WORKFLOW_EXECUTORS_MODULE", explicitModule);
     candidates.push(explicitModule.startsWith("file:") ? explicitModule : toFileUrl(explicitModule));
   }
 
@@ -1347,7 +1367,39 @@ const journalQueryParams = {
 };
 const journalQuerySchema = z.object(journalQueryParams);
 
-export function registerWorkflowTools(server: McpToolServer): void {
+/**
+ * Wrap a real McpToolServer so every handler we register catches thrown
+ * errors and returns a structured `{isError: true, content: [...]}` MCP
+ * tool result instead of letting the SDK convert the throw into a
+ * JSON-RPC error frame. Some MCP hosts (notably Cursor) surface JSON-RPC
+ * errors as a generic "tool failed" with no message, which strips the
+ * agent of the context it needs to recover (write-gate blocks, schema
+ * mismatches, downstream RPC failures).
+ *
+ * Read-only tools in server.ts use the same pattern via per-handler
+ * try/catch + errorContent(). This shim applies it uniformly to every
+ * mutation handler in this module.
+ */
+function wrapServerWithErrorHandler(realServer: McpToolServer): McpToolServer {
+  return {
+    tool(name, description, params, handler) {
+      return realServer.tool(name, description, params, async (args) => {
+        try {
+          return await handler(args);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          return {
+            isError: true as const,
+            content: [{ type: "text" as const, text: message }],
+          };
+        }
+      });
+    },
+  };
+}
+
+export function registerWorkflowTools(realServer: McpToolServer): void {
+  const server = wrapServerWithErrorHandler(realServer);
   server.tool(
     "gsd_decision_save",
     "Record a project decision to the GSD database and regenerate DECISIONS.md.",
