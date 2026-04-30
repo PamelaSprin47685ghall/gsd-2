@@ -44,6 +44,16 @@ const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const liveSubagentProcesses = new Set<ChildProcess>();
 
+function getActiveExtensionArgs(): string[] {
+	const args: string[] = [];
+	for (let i = 0; i < process.argv.length; i++) {
+		if (process.argv[i] === "--extension" && process.argv[i + 1]) {
+			args.push("--extension", process.argv[i + 1]);
+		}
+	}
+	return args;
+}
+
 async function stopLiveSubagents(): Promise<void> {
 	const active = Array.from(liveSubagentProcesses);
 	if (active.length === 0) return;
@@ -409,7 +419,10 @@ async function runSingleAgent(
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const bundledPaths = (process.env.GSD_BUNDLED_EXTENSION_PATHS ?? "").split(path.delimiter).map(s => s.trim()).filter(Boolean);
-			const extensionArgs = bundledPaths.flatMap(p => ["--extension", p]);
+			const extensionArgs = [
+				...bundledPaths.flatMap(p => ["--extension", p]),
+				...getActiveExtensionArgs(),
+			];
 			const proc = spawn(
 				process.execPath,
 				[process.env.GSD_BIN_PATH!, ...extensionArgs, ...args],
@@ -537,7 +550,10 @@ async function runSingleAgentInCmuxSplit(
 		}
 
 		const bundledPaths = (process.env.GSD_BUNDLED_EXTENSION_PATHS ?? "").split(path.delimiter).map((s) => s.trim()).filter(Boolean);
-		const extensionArgs = bundledPaths.flatMap((p) => ["--extension", p]);
+		const extensionArgs = [
+			...bundledPaths.flatMap((p) => ["--extension", p]),
+			...getActiveExtensionArgs(),
+		];
 		const processArgs = [process.env.GSD_BIN_PATH!, ...extensionArgs, ...buildSubagentProcessArgs(agent, task, tmpPromptPath, modelOverride)];
 		// Normalize all paths to forward slashes before embedding in bash strings.
 		// On Windows, backslashes are interpreted as escape characters by bash,
