@@ -754,32 +754,32 @@ export async function createMcpServer(
         const validationError = validateAskUserQuestionsPayload(questions);
         if (validationError) return errorContent(validationError);
 
-        // Delegate to remote-questions manager when a remote channel is configured
-        // (Discord, Slack, Telegram). This path is the only one reachable for
-        // Claude Code-under-gsd sessions, which have no local TUI.
+        // Local-first: try the MCP host's elicitation channel (Claude Code,
+        // Cursor, etc.) before any configured remote channel. A misconfigured
+        // remote (e.g. expired Discord token returning 401) must not block the
+        // depth-verification gate when the user is sitting in front of the host.
+        const elicitation = await withElicitTimeout(
+          server.server.elicitInput(buildAskUserQuestionsElicitRequest(questions)),
+          'ask_user_questions',
+        );
+        if (elicitation.action === 'accept' && elicitation.content) {
+          return textContent(formatAskUserQuestionsElicitResult(questions, elicitation));
+        }
+
+        // Local cancelled / unavailable — fall back to the configured remote
+        // channel (Discord, Slack, Telegram) if one is set.
         if (isRemoteConfigured()) {
           const remoteResult = await tryRemoteQuestions(questions, extra?.signal);
           if (remoteResult) {
             const details = remoteResult.details as Record<string, unknown> | undefined;
             if (details?.['timed_out'] || details?.['error']) {
-              // Surface timeout/error as plain text so the LLM knows to retry
               return textContent(remoteResult.content[0]?.text ?? 'Remote questions timed out or failed');
             }
             return textContent(remoteResult.content[0]?.text ?? '');
           }
-          // resolveRemoteConfig() returned null between isRemoteConfigured() and
-          // tryRemoteQuestions() (e.g. env var was cleared) — fall through to local.
         }
 
-        const elicitation = await withElicitTimeout(
-          server.server.elicitInput(buildAskUserQuestionsElicitRequest(questions)),
-          'ask_user_questions',
-        );
-        if (elicitation.action !== 'accept' || !elicitation.content) {
-          return textContent('ask_user_questions was cancelled before receiving a response');
-        }
-
-        return textContent(formatAskUserQuestionsElicitResult(questions, elicitation));
+        return textContent('ask_user_questions was cancelled before receiving a response');
       } catch (err) {
         return errorContent(err instanceof Error ? err.message : String(err));
       }
