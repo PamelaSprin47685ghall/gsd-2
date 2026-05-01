@@ -1041,6 +1041,44 @@ describe('createMcpServer tool registration', () => {
     );
   });
 
+  it('ask_user_questions reports a malformed remote response as cancelled, not silent success (regression #5267)', async () => {
+    const questions = [
+      {
+        id: 'depth_verification_M001',
+        header: 'Depth Check',
+        question: 'Did I capture the depth right?',
+        options: [
+          { label: 'Yes, you got it (Recommended)', description: 'Continue.' },
+          { label: 'Not quite', description: 'Clarify.' },
+        ],
+      },
+    ];
+
+    const result = await askUserQuestionsHandler(questions, undefined, {
+      async elicitInput() {
+        throw new Error('MCP host does not support elicitation');
+      },
+      isRemoteConfigured() {
+        return true;
+      },
+      async tryRemoteQuestions() {
+        // Simulates a remote module returning a non-conforming `details.response`
+        // (e.g. a stale build, a wire mismatch). The handler must not surface
+        // this as `cancelled: false, response: null` — that would lie to any
+        // consumer reading `structuredContent.cancelled`.
+        return {
+          content: [{ type: 'text', text: '{}' }],
+          details: { remote: true, channel: 'discord', timed_out: false, response: 'not-an-object' },
+        };
+      },
+    });
+
+    assert.deepEqual(
+      (result as { structuredContent?: unknown }).structuredContent,
+      { questions, response: null, cancelled: true },
+    );
+  });
+
   it('ask_user_questions returns cancelled structuredContent when remote is unconfigured and local declines (regression #5267)', async () => {
     const questions = [
       {

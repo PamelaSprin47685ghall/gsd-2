@@ -835,18 +835,32 @@ function formatForTool(answer: RemoteAnswer): Record<string, { answers: string[]
 /**
  * Normalize a `RemoteAnswer` into the `RoundResult` shape the GSD
  * discussion-gate hook reads from `tool_result` `details.response`. Mirrors
- * `src/resources/extensions/remote-questions/manager.ts:toRoundResultResponse`.
+ * `src/resources/extensions/remote-questions/manager.ts:toRoundResultResponse`
+ * and the local-path helper `buildAskUserQuestionsRoundResult` in server.ts.
  * Without this, the remote channel (Discord / Slack / Telegram) would have
  * the same gate-stuck problem as the local elicitation path. See #5267.
+ *
+ * `questions` is required so the multi-select contract is preserved: a
+ * `allowMultiple` question with a single selection must still surface
+ * `selected: [label]` so consumers reading `selected.includes(...)` keep
+ * working. Falling back to length-based inference (the previous behavior)
+ * silently demoted single-pick multi-select answers to strings.
  */
-export function toRoundResultResponse(answer: RemoteAnswer): {
+export function toRoundResultResponse(
+  answer: RemoteAnswer,
+  questions: RemoteQuestion[],
+): {
   endInterview: false;
   answers: Record<string, { selected: string | string[]; notes: string }>;
 } {
+  const allowMultipleById = new Map<string, boolean>();
+  for (const q of questions) allowMultipleById.set(q.id, q.allowMultiple ?? false);
+
   const normalized: Record<string, { selected: string | string[]; notes: string }> = {};
   for (const [id, data] of Object.entries(answer.answers)) {
     const list = data.answers ?? [];
-    const selected: string | string[] = list.length <= 1 ? (list[0] ?? '') : list;
+    const allowMultiple = allowMultipleById.get(id) ?? false;
+    const selected: string | string[] = allowMultiple ? list : (list[0] ?? '');
     normalized[id] = { selected, notes: data.user_note ?? '' };
   }
   return { endInterview: false, answers: normalized };
@@ -946,7 +960,7 @@ export async function tryRemoteQuestions(
       promptId: prompt.id,
       threadUrl: ref.threadUrl ?? null,
       questions,
-      response: toRoundResultResponse(answer),
+      response: toRoundResultResponse(answer, questions),
       status: 'answered',
     },
   };

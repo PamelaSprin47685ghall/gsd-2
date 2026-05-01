@@ -601,12 +601,22 @@ export async function askUserQuestionsHandler(
         // Successful remote answer — surface the normalized RoundResult that
         // remote-questions.ts attached to `details.response` so the gate hook
         // sees `details.response.answers[id].selected` on this path too.
-        const remoteResponse = isRoundResultLike(details?.['response']) ? details!['response'] as AskUserQuestionsRoundResult : null;
-        const acceptedStructured: AskUserQuestionsStructuredContent = {
-          questions,
-          response: remoteResponse,
-          cancelled: false,
-        };
+        // A malformed `response` (failing isRoundResultLike) is reported as
+        // an explicit cancellation rather than a silent `cancelled: false`
+        // with `response: null` — the latter would lie to any consumer that
+        // reads `structuredContent.cancelled` independently of `.response`.
+        const hasValidResponse = isRoundResultLike(details?.['response']);
+        const acceptedStructured: AskUserQuestionsStructuredContent = hasValidResponse
+          ? {
+              questions,
+              response: details!['response'] as AskUserQuestionsRoundResult,
+              cancelled: false,
+            }
+          : {
+              questions,
+              response: null,
+              cancelled: true,
+            };
         return {
           content: [{ type: 'text' as const, text: remoteResult.content[0]?.text ?? '' }],
           structuredContent: acceptedStructured as unknown as Record<string, unknown>,
