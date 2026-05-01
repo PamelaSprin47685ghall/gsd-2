@@ -1,7 +1,15 @@
 import type { AgentTool } from "@gsd/pi-agent-core";
 import { type Static, Type } from "@sinclair/typebox";
+import { randomBytes } from "crypto";
 import { constants } from "fs";
-import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
+import {
+	access as fsAccess,
+	readFile as fsReadFile,
+	rename as fsRename,
+	unlink as fsUnlink,
+	writeFile as fsWriteFile,
+} from "fs/promises";
+import { basename, dirname, join } from "path";
 import {
 	detectLineEnding,
 	fuzzyFindText,
@@ -55,8 +63,36 @@ function withLock<T>(path: string, fn: (signal: AbortSignal) => Promise<T>): Pro
 	fileLocks.set(path, p);
 	p.finally(() => {
 		if (fileLocks.get(path) === p) fileLocks.delete(path);
-	});
+	}).catch(() => {});
 	return p;
+}
+
+/**
+ * Write content atomically via temp file + rename.
+ *
+ * Cross-process safety: two processes writing to the same file can interleave
+ * on writeFile + writeFile, producing a corrupted (spliced) result.
+ * Atomic write avoids this by writing to a temp file first, then using
+ * rename() — which is atomic on the same filesystem on POSIX.
+ *
+ * On failure, the temp file is cleaned up best-effort. The target file is
+ * never touched until the full content is safely on disk.
+ */
+async function atomicWrite(filePath: string, content: string): Promise<void> {
+	const dir = dirname(filePath);
+	const tmpName = `.${basename(filePath)}.${randomBytes(6).toString("hex")}.tmp`;
+	const tmpPath = join(dir, tmpName);
+	try {
+		await fsWriteFile(tmpPath, content, "utf-8");
+		await fsRename(tmpPath, filePath);
+	} catch (err) {
+		try {
+			await fsUnlink(tmpPath);
+		} catch {
+			/* best-effort cleanup */
+		}
+		throw err;
+	}
 }
 
 const editSchema = Type.Object({
@@ -81,7 +117,7 @@ export interface EditToolDetails {
 export interface EditOperations {
 	/** Read file contents as a Buffer */
 	readFile: (absolutePath: string) => Promise<Buffer>;
-	/** Write content to a file */
+	/** Write content to a file atomically (temp + rename) */
 	writeFile: (absolutePath: string, content: string) => Promise<void>;
 	/** Check if file is readable and writable (throw if not) */
 	access: (absolutePath: string) => Promise<void>;
@@ -89,7 +125,7 @@ export interface EditOperations {
 
 const defaultEditOperations: EditOperations = {
 	readFile: (path) => fsReadFile(path),
-	writeFile: (path, content) => fsWriteFile(path, content, "utf-8"),
+	writeFile: atomicWrite,
 	access: (path) => fsAccess(path, constants.R_OK | constants.W_OK),
 };
 
@@ -126,17 +162,15 @@ export function createEditTool(cwd: string, options?: EditToolOptions): AgentToo
 			//   - Edit 1 reads (version A), modifies, writes (version B)
 			//   - Edit 2 reads (version B), modifies, writes (version C)
 			// Without this, parallel edits could both read the same version and one would clobber the other.
+			//
+			// Abstain from addEventListener on AbortSignals — throwing inside event
+			// listener dispatch escapes the promise chain and causes an unhandled
+			// exception that crashes the process. Instead, combine signals with
+			// AbortSignal.any and check `.aborted` at checkpoints within the async
+			// function (matching editplus's signal?.aborted pattern).
 			return withLock(absolutePath, async (lockSignal) => {
-				// Combine caller signal and lock timeout signal
-				const onAbort = () => {
-					throw new Error("Operation aborted");
-				};
-				if (signal) {
-					if (signal.aborted) throw new Error("Operation aborted");
-					signal.addEventListener("abort", onAbort, { once: true });
-				}
-				if (lockSignal.aborted) throw new Error("Lock timed out");
-				lockSignal.addEventListener("abort", onAbort, { once: true });
+				const combinedSignal = signal ? AbortSignal.any([signal, lockSignal]) : lockSignal;
+				if (combinedSignal.aborted) throw new Error("Operation aborted");
 
 				try {
 					// Check if file exists
@@ -145,10 +179,12 @@ export function createEditTool(cwd: string, options?: EditToolOptions): AgentToo
 					} catch {
 						throw new Error(`File not found: ${path}`);
 					}
+					if (combinedSignal.aborted) throw new Error("Operation aborted");
 
 					// Read the file
 					const buffer = await ops.readFile(absolutePath);
 					const rawContent = buffer.toString("utf-8");
+					if (combinedSignal.aborted) throw new Error("Operation aborted");
 
 					// Strip BOM before matching (LLM won't include invisible BOM in oldText)
 					const { bom, text: content } = stripBom(rawContent);
@@ -177,6 +213,7 @@ export function createEditTool(cwd: string, options?: EditToolOptions): AgentToo
 							`Found ${occurrences} occurrences of the text in ${path}. The text must be unique. Please provide more context to make it unique.`,
 						);
 					}
+					if (combinedSignal.aborted) throw new Error("Operation aborted");
 
 					// Perform replacement using the matched text position
 					// When fuzzy matching was used, contentForReplacement is the normalized version
@@ -194,7 +231,9 @@ export function createEditTool(cwd: string, options?: EditToolOptions): AgentToo
 					}
 
 					const finalContent = bom + restoreLineEndings(newContent, originalEnding);
+					// Atomic write: temp file + rename prevents cross-process "franken-files"
 					await ops.writeFile(absolutePath, finalContent);
+					if (combinedSignal.aborted) throw new Error("Operation aborted");
 
 					try {
 						notifyFileChanged(absolutePath);
@@ -213,8 +252,7 @@ export function createEditTool(cwd: string, options?: EditToolOptions): AgentToo
 						details: { diff: diffResult.diff, firstChangedLine: diffResult.firstChangedLine },
 					};
 				} finally {
-					if (signal) signal.removeEventListener("abort", onAbort);
-					lockSignal.removeEventListener("abort", onAbort);
+					/* no event listeners to clean up — signals are checked at checkpoints */
 				}
 			});
 		},
