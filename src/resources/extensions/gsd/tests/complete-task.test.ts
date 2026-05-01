@@ -403,12 +403,11 @@ console.log('\n=== complete-task: handler idempotency ===');
   const r1 = await handleCompleteTask(params, basePath);
   assertTrue(!('error' in r1), 'first call should succeed');
 
-  // Verify complete-task did not duplicate T01. State reconciliation may import
-  // the remaining plan task from disk so the DB stays aligned with S01-PLAN.md.
+  // Verify complete-task did not duplicate T01. S01-PLAN.md is a projection,
+  // so the remaining plan task is not imported implicitly.
   const tasks = getSliceTasks('M001', 'S01');
-  assertEq(tasks.length, 2, 'should have T01 plus reconciled T02 after first call');
+  assertEq(tasks.length, 1, 'should only have the completed DB task after first call');
   assertEq(tasks.filter(t => t.id === 'T01').length, 1, 'should have exactly one T01 row after first call');
-  assertEq(tasks.find(t => t.id === 'T02')?.status, 'pending', 'T02 should be reconciled as pending');
 
   // Second call with same params — state machine guard rejects (task is already complete)
   const r2 = await handleCompleteTask(params, basePath);
@@ -419,7 +418,7 @@ console.log('\n=== complete-task: handler idempotency ===');
 
   // Still no duplicate rows from the rejected second call.
   const tasksAfter = getSliceTasks('M001', 'S01');
-  assertEq(tasksAfter.length, 2, 'should still have T01 plus reconciled T02 after rejected second call');
+  assertEq(tasksAfter.length, 1, 'should still only have T01 after rejected second call');
   assertEq(tasksAfter.filter(t => t.id === 'T01').length, 1, 'should still have exactly one T01 row');
 
   cleanupDir(basePath);

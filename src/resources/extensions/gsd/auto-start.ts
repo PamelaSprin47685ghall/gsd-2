@@ -855,18 +855,11 @@ export async function bootstrapAutoSession(
     const gsdDbPath = resolveProjectRootDbPath(s.basePath);
     const gsdDirPath = join(s.basePath, ".gsd");
     if (existsSync(gsdDirPath) && !existsSync(gsdDbPath)) {
-      const hasDecisions = existsSync(join(gsdDirPath, "DECISIONS.md"));
-      const hasRequirements = existsSync(join(gsdDirPath, "REQUIREMENTS.md"));
-      const hasMilestones = existsSync(join(gsdDirPath, "milestones"));
       try {
         const { openDatabase: openDb } = await import("./gsd-db.js");
         openDb(gsdDbPath);
-        if (hasDecisions || hasRequirements || hasMilestones) {
-          const { migrateFromMarkdown } = await import("./md-importer.js");
-          migrateFromMarkdown(s.basePath);
-        }
       } catch (err) {
-        logError("engine", `auto-migration failed: ${(err as Error).message}`);
+        logError("engine", `failed to initialize project database: ${(err as Error).message}`);
       }
     }
     if (existsSync(gsdDbPath) && !isDbAvailable()) {

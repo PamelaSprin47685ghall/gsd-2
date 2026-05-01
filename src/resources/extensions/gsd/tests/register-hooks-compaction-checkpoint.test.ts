@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 
 import { registerHooks } from "../bootstrap/register-hooks.ts";
 import { parseContinue } from "../files.ts";
-import { closeDatabase } from "../gsd-db.ts";
+import { closeDatabase, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 
 function createPlanningFixtureBase(): string {
@@ -38,6 +38,11 @@ function createPlanningFixtureBase(): string {
 ## Tasks
 `,
   );
+
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Test Slice", status: "active", risk: "low", depends: [] });
+  closeDatabase();
 
   return base;
 }

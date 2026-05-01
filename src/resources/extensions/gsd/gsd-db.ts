@@ -1602,6 +1602,34 @@ export function getActiveRequirements(): Requirement[] {
   }));
 }
 
+export function getRequirementCounts(): {
+  active: number;
+  validated: number;
+  deferred: number;
+  outOfScope: number;
+  blocked: number;
+  total: number;
+} {
+  if (!currentDb) {
+    return { active: 0, validated: 0, deferred: 0, outOfScope: 0, blocked: 0, total: 0 };
+  }
+  const rows = currentDb
+    .prepare("SELECT lower(status) as status, COUNT(*) as count FROM requirements GROUP BY lower(status)")
+    .all();
+  const counts = { active: 0, validated: 0, deferred: 0, outOfScope: 0, blocked: 0, total: 0 };
+  for (const row of rows) {
+    const status = String(row["status"] ?? "");
+    const count = Number(row["count"] ?? 0);
+    counts.total += count;
+    if (status === "active") counts.active += count;
+    else if (status === "validated") counts.validated += count;
+    else if (status === "deferred") counts.deferred += count;
+    else if (status === "out-of-scope" || status === "out_of_scope") counts.outOfScope += count;
+    else if (status === "blocked") counts.blocked += count;
+  }
+  return counts;
+}
+
 export function getDbOwnerPid(): number {
   return currentPid;
 }

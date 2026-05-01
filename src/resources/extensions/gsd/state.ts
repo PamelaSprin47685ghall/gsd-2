@@ -40,13 +40,13 @@ import { isClosedStatus, isDeferredStatus } from './status-guards.js';
 import { nativeBatchParseGsdFiles, type BatchParsedFile } from './native-parser-bridge.js';
 
 import { join, resolve } from 'path';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { debugCount, debugTime } from './debug-logger.js';
-import { logWarning, logError } from './workflow-logger.js';
+import { logWarning } from './workflow-logger.js';
 import { extractVerdict } from './verdict-parser.js';
-import { loadEffectiveGSDPreferences } from './preferences.js';
 import { detectPendingEscalation } from './escalation.js';
 import { isTerminalMilestoneSummaryContent } from './milestone-summary-classifier.js';
+import { loadEffectiveGSDPreferences } from './preferences.js';
 
 import {
   isDbAvailable,
@@ -57,13 +57,8 @@ import {
   getSliceTasks,
   getReplanHistory,
   getSlice,
-  insertMilestone,
-  insertSlice,
-  insertTask,
-  updateSliceStatus,
-  updateTaskStatus,
+  getRequirementCounts,
   getPendingGateCountForTurn,
-  autoHealSketchFlags,
   type MilestoneRow,
   type SliceRow,
   type TaskRow,
@@ -296,36 +291,13 @@ export async function deriveState(basePath: string): Promise<GSDState> {
   const stopTimer = debugTime("derive-state-impl");
   let result: GSDState;
 
-  // Dual-path: try DB-backed derivation first when hierarchy tables are populated
+  // Dual-path: DB-backed derivation is authoritative whenever the DB is open.
+  // Markdown remains a fallback only when no DB connection is available.
   if (isDbAvailable()) {
-    let dbMilestones = getAllMilestones();
-
-    // Disk→DB reconciliation when DB is empty but disk has milestones (#2631).
-    // deriveStateFromDb() does its own reconciliation, but deriveState() skips
-    // it entirely when the DB is empty. Sync here so the DB path is used when
-    // disk milestones exist but haven't been migrated yet.
-    if (dbMilestones.length === 0) {
-      const diskIds = findMilestoneIds(basePath);
-      let synced = false;
-      for (const diskId of diskIds) {
-        if (!isGhostMilestone(basePath, diskId)) {
-          insertMilestone(diskMilestoneInsert(basePath, diskId));
-          synced = true;
-        }
-      }
-      if (synced) dbMilestones = getAllMilestones();
-    }
-
-    if (dbMilestones.length > 0) {
-      const stopDbTimer = debugTime("derive-state-db");
-      result = await deriveStateFromDb(basePath);
-      stopDbTimer({ phase: result.phase, milestone: result.activeMilestone?.id });
-      _telemetry.dbDeriveCount++;
-    } else {
-      // DB open but no milestones on disk either — use filesystem path
-      result = await _deriveStateImpl(basePath);
-      _telemetry.markdownDeriveCount++;
-    }
+    const stopDbTimer = debugTime("derive-state-db");
+    result = await deriveStateFromDb(basePath);
+    stopDbTimer({ phase: result.phase, milestone: result.activeMilestone?.id });
+    _telemetry.dbDeriveCount++;
   } else {
     // Only warn when DB initialization was attempted and failed — not when
     // the DB simply hasn't been opened yet (e.g. during before_agent_start
@@ -369,115 +341,11 @@ function extractContextTitle(content: string | null, fallback: string): string {
 // Alias kept for backward compatibility within this file.
 const isStatusDone = isClosedStatus;
 
-function loadSync(path: string | null): string | null {
-  if (!path) return null;
-  try {
-    return readFileSync(path, "utf-8");
-  } catch {
-    return null;
-  }
-}
-
-function diskMilestoneInsert(basePath: string, mid: string): {
-  id: string;
-  title?: string;
-  status: string;
-  depends_on: string[];
-} {
-  const contextContent = loadSync(resolveMilestoneFile(basePath, mid, "CONTEXT"));
-  const draftContent = !contextContent ? loadSync(resolveMilestoneFile(basePath, mid, "CONTEXT-DRAFT")) : null;
-  const roadmapContent = loadSync(resolveMilestoneFile(basePath, mid, "ROADMAP"));
-  const summaryContent = loadSync(resolveMilestoneFile(basePath, mid, "SUMMARY"));
-  const roadmap = roadmapContent ? parseRoadmap(roadmapContent) : null;
-  const summary = summaryContent ? parseSummary(summaryContent) : null;
-  const summaryTerminal = summaryContent != null && isTerminalMilestoneSummaryContent(summaryContent);
-  const parked = resolveMilestoneFile(basePath, mid, "PARKED") !== null;
-
-  return {
-    id: mid,
-    title: roadmap
-      ? stripMilestonePrefix(roadmap.title)
-      : (contextContent || draftContent)
-        ? extractContextTitle(contextContent || draftContent, mid)
-        : (summary?.title || mid),
-    status: parked ? "parked" : summaryTerminal ? "complete" : "active",
-    depends_on: parseContextDependsOn(contextContent ?? draftContent),
-  };
-}
-
 /**
  * Derive GSD state from the milestones/slices/tasks DB tables.
- * Flag files (PARKED, VALIDATION, CONTINUE, REPLAN, REPLAN-TRIGGER, CONTEXT-DRAFT)
- * are still checked on the filesystem since they aren't in DB tables.
- * Requirements also stay file-based via parseRequirementCounts().
- *
- * Must produce field-identical GSDState to _deriveStateImpl() for the same project.
+ * Markdown files are projections only in this path; they are never imported,
+ * reconciled, or used as completion signals.
  */
-function reconcileDiskToDb(basePath: string): MilestoneRow[] {
-  let allMilestones = getAllMilestones();
-  const dbIdSet = new Set(allMilestones.map(m => m.id));
-  const diskIds = findMilestoneIds(basePath);
-  let synced = false;
-  for (const diskId of diskIds) {
-    if (!dbIdSet.has(diskId) && !isGhostMilestone(basePath, diskId)) {
-      insertMilestone(diskMilestoneInsert(basePath, diskId));
-      synced = true;
-    }
-  }
-  if (synced) allMilestones = getAllMilestones();
-
-  for (const mid of diskIds) {
-    if (isGhostMilestone(basePath, mid)) continue;
-    const roadmapPath = resolveMilestoneFile(basePath, mid, "ROADMAP");
-    if (!roadmapPath) continue;
-
-    const dbSlices = getMilestoneSlices(mid);
-    const dbSliceIds = new Set(dbSlices.map(s => s.id));
-
-    let roadmapContent: string;
-    try {
-      roadmapContent = readFileSync(roadmapPath, "utf-8");
-    } catch (err) {
-      logWarning("state", "reconcileDiskToDb: roadmap read failed, skipping milestone", {
-        mid,
-        error: (err as Error).message,
-      });
-      continue;
-    }
-
-    const parsed = parseRoadmap(roadmapContent);
-    for (const s of parsed.slices) {
-      if (dbSliceIds.has(s.id)) continue;
-      const summaryPath = resolveSliceFile(basePath, mid, s.id, "SUMMARY");
-      const sliceStatus = (s.done || summaryPath) ? "complete" : "pending";
-      insertSlice({
-        id: s.id, milestoneId: mid, title: s.title,
-        status: sliceStatus, risk: s.risk,
-        depends: s.depends, demo: s.demo,
-      });
-    }
-
-    // Reconcile stale *existing* slice rows (#3599): a slice row may exist in
-    // the DB with status "pending" even though disk artifacts (SUMMARY) prove
-    // completion — the same class of desync that task-level reconciliation
-    // (further below) already handles.  Without this, the dependency resolver
-    // builds doneSliceIds from stale DB rows and downstream slices stay blocked
-    // forever with "No slice eligible".
-    for (const dbSlice of dbSlices) {
-      if (isStatusDone(dbSlice.status)) continue;
-      const summaryPath = resolveSliceFile(basePath, mid, dbSlice.id, "SUMMARY");
-      if (summaryPath) {
-        try {
-          updateSliceStatus(mid, dbSlice.id, "complete");
-          logWarning("reconcile", `slice ${mid}/${dbSlice.id} status reconciled from "${dbSlice.status}" to "complete" (#3599)`, { mid, sid: dbSlice.id });
-        } catch (e) {
-          logError("reconcile", `failed to update slice ${dbSlice.id}`, { sid: dbSlice.id, error: (e as Error).message });
-        }
-      }
-    }
-  }
-  return allMilestones;
-}
 
 function buildCompletenessSet(basePath: string, milestones: MilestoneRow[]) {
   const completeMilestoneIds = new Set<string>();
@@ -488,8 +356,7 @@ function buildCompletenessSet(basePath: string, milestones: MilestoneRow[]) {
   // (crashed complete-milestone turn, partial merge, manual edit) must not
   // flip derived state to complete and cascade into a false auto-merge (#4179).
   for (const m of milestones) {
-    const parkedFile = resolveMilestoneFile(basePath, m.id, "PARKED");
-    if (parkedFile || m.status === 'parked') {
+    if (m.status === 'parked') {
       parkedMilestoneIds.add(m.id);
       continue;
     }
@@ -530,16 +397,7 @@ async function buildRegistryAndFindActive(
     // not imply completion. The summary file may still be consulted below as a
     // title source for legitimately-complete milestones whose DB row has no title.
     if (completeMilestoneIds.has(m.id)) {
-      let title = stripMilestonePrefix(m.title) || m.id;
-      if (!m.title) {
-        const summaryFile = resolveMilestoneFile(basePath, m.id, "SUMMARY");
-        if (summaryFile) {
-          const summaryContent = await loadFile(summaryFile);
-          if (summaryContent) {
-            title = parseSummary(summaryContent).title || m.id;
-          }
-        }
-      }
+      const title = stripMilestonePrefix(m.title) || m.id;
       registry.push({ id: m.id, title, status: 'complete' });
       continue;
     }
@@ -766,72 +624,6 @@ function resolveSliceDependencies(activeMilestoneSlices: SliceRow[]): { activeSl
   return { activeSlice: null, activeSliceRow: null };
 }
 
-async function reconcileSliceTasks(
-  basePath: string,
-  milestoneId: string,
-  sliceId: string,
-  planFile: string
-): Promise<TaskRow[]> {
-  let tasks = getSliceTasks(milestoneId, sliceId);
-
-  // #3600/#4974: import missing plan-file tasks even when the DB already has
-  // a partial task set. Existing DB task statuses stay authoritative.
-  if (planFile) {
-    try {
-      const planContent = await loadFile(planFile);
-      if (planContent) {
-        const diskPlan = parsePlan(planContent);
-        if (diskPlan.tasks.length > 0) {
-          const dbTaskIds = new Set(tasks.map(t => t.id));
-          let inserted = 0;
-          for (let i = 0; i < diskPlan.tasks.length; i++) {
-            const t = diskPlan.tasks[i];
-            if (dbTaskIds.has(t.id)) continue;
-            try {
-              insertTask({
-                id: t.id,
-                sliceId,
-                milestoneId,
-                title: t.title,
-                status: t.done ? 'complete' : 'pending',
-                sequence: i + 1,
-              });
-              inserted++;
-            } catch (insertErr) {
-              logWarning("reconcile", `failed to insert task ${t.id} from plan file: ${insertErr instanceof Error ? insertErr.message : String(insertErr)}`);
-            }
-          }
-          if (inserted > 0) {
-            tasks = getSliceTasks(milestoneId, sliceId);
-            logWarning("reconcile", `imported ${inserted} missing task(s) from plan file for ${milestoneId}/${sliceId}`, { mid: milestoneId, sid: sliceId });
-          }
-        }
-      }
-    } catch (err) {
-      logError("reconcile", `plan-file task import failed for ${milestoneId}/${sliceId}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  let reconciled = false;
-  for (const t of tasks) {
-    if (isStatusDone(t.status)) continue;
-    const summaryPath = resolveTaskFile(basePath, milestoneId, sliceId, t.id, "SUMMARY");
-    if (summaryPath && existsSync(summaryPath)) {
-      try {
-        updateTaskStatus(milestoneId, sliceId, t.id, "complete", new Date().toISOString());
-        logWarning("reconcile", `task ${milestoneId}/${sliceId}/${t.id} status reconciled from "${t.status}" to "complete" (#2514)`, { mid: milestoneId, sid: sliceId, tid: t.id });
-        reconciled = true;
-      } catch (e) {
-        logError("reconcile", `failed to update task ${t.id}`, { tid: t.id, error: (e as Error).message });
-      }
-    }
-  }
-  if (reconciled) {
-    tasks = getSliceTasks(milestoneId, sliceId);
-  }
-  return tasks;
-}
-
 async function detectBlockers(basePath: string, milestoneId: string, sliceId: string, tasks: TaskRow[]): Promise<string | null> {
   const completedTasks = tasks.filter(t => isStatusDone(t.status));
   for (const ct of completedTasks) {
@@ -852,10 +644,7 @@ async function detectBlockers(basePath: string, milestoneId: string, sliceId: st
 
 function checkReplanTrigger(basePath: string, milestoneId: string, sliceId: string): boolean {
   const sliceRow = getSlice(milestoneId, sliceId);
-  const dbTriggered = !!sliceRow?.replan_triggered_at;
-  const diskTriggered = !dbTriggered &&
-    !!resolveSliceFile(basePath, milestoneId, sliceId, "REPLAN-TRIGGER");
-  return dbTriggered || diskTriggered;
+  return !!sliceRow?.replan_triggered_at;
 }
 
 async function checkInterruptedWork(basePath: string, milestoneId: string, sliceId: string): Promise<boolean> {
@@ -866,9 +655,9 @@ async function checkInterruptedWork(basePath: string, milestoneId: string, slice
 }
 
 export async function deriveStateFromDb(basePath: string): Promise<GSDState> {
-  const requirements = parseRequirementCounts(await loadFile(resolveGsdRootFile(basePath, "REQUIREMENTS")));
+  const requirements = getRequirementCounts();
 
-  let allMilestones = reconcileDiskToDb(basePath);
+  const allMilestones = getAllMilestones();
 
   const customOrder = loadQueueOrder(basePath);
   const sortedIds = sortByQueueOrder(allMilestones.map(m => m.id), customOrder);
@@ -940,15 +729,7 @@ export async function deriveStateFromDb(basePath: string): Promise<GSDState> {
     return handleAllSlicesDone(basePath, activeMilestone, registry, requirements, milestoneProgress, sliceProgress);
   }
 
-  // ADR-011 auto-heal: if a slice has a PLAN on disk but is still flagged is_sketch=1
-  // (e.g. a crash between plan-slice write and the sketch flip), reconcile before
-  // running phase derivation so the flag doesn't misroute state.
-  autoHealSketchFlags(activeMilestone.id, (sid) =>
-    !!resolveSliceFile(basePath, activeMilestone.id, sid, "PLAN"),
-  );
-  // Re-read slices after auto-heal so downstream reads see fresh is_sketch values.
-  const healedSlices = getMilestoneSlices(activeMilestone.id);
-  const activeSliceContext = resolveSliceDependencies(healedSlices);
+  const activeSliceContext = resolveSliceDependencies(activeMilestoneSlices);
   if (!activeSliceContext.activeSlice) {
     // If locked slice wasn't found, it returns null but logs warning, we need to return 'blocked'
     if (process.env.GSD_SLICE_LOCK) {
@@ -970,32 +751,20 @@ export async function deriveStateFromDb(basePath: string): Promise<GSDState> {
   }
   const { activeSlice, activeSliceRow } = activeSliceContext;
 
-  const planFile = resolveSliceFile(basePath, activeMilestone.id, activeSlice.id, "PLAN");
-  if (!planFile) {
-    // ADR-011: sketch slices with progressive_planning enabled enter the
-    // `refining` phase — a refine-slice unit expands the sketch into a full plan
-    // before execution. When the flag is off, sketches are indistinguishable
-    // from a missing plan and fall through to the normal `planning` phase.
-    const progressive = loadEffectiveGSDPreferences()?.preferences?.phases?.progressive_planning === true;
-    if (progressive && activeSliceRow?.is_sketch === 1) {
-      return {
-        activeMilestone, activeSlice, activeTask: null,
-        phase: 'refining', recentDecisions: [], blockers: [],
-        nextAction: `Refine sketch slice ${activeSlice.id} (${activeSlice.title}) using prior slice context.`,
-        registry, requirements,
-        progress: { milestones: milestoneProgress, slices: sliceProgress },
-      };
-    }
+  // ADR-011: DB slice metadata is authoritative for sketch refinement.
+  // PLAN.md is a projection and is deliberately not used to infer this state.
+  const progressive = loadEffectiveGSDPreferences()?.preferences?.phases?.progressive_planning === true;
+  if (progressive && activeSliceRow?.is_sketch === 1) {
     return {
       activeMilestone, activeSlice, activeTask: null,
-      phase: 'planning', recentDecisions: [], blockers: [],
-      nextAction: `Plan slice ${activeSlice.id} (${activeSlice.title}).`,
+      phase: 'refining', recentDecisions: [], blockers: [],
+      nextAction: `Refine sketch slice ${activeSlice.id} (${activeSlice.title}) using prior slice context.`,
       registry, requirements,
       progress: { milestones: milestoneProgress, slices: sliceProgress },
     };
   }
 
-  const tasks = await reconcileSliceTasks(basePath, activeMilestone.id, activeSlice.id, planFile);
+  const tasks = getSliceTasks(activeMilestone.id, activeSlice.id);
   
   const taskProgress = {
     done: tasks.filter(t => isStatusDone(t.status)).length,
@@ -1018,27 +787,13 @@ export async function deriveStateFromDb(basePath: string): Promise<GSDState> {
     return {
       activeMilestone, activeSlice, activeTask: null,
       phase: 'planning', recentDecisions: [], blockers: [],
-      nextAction: `Slice ${activeSlice.id} has a plan file but no tasks. Add tasks to the plan.`,
+      nextAction: `Slice ${activeSlice.id} has no DB tasks. Plan slice tasks before execution.`,
       registry, requirements,
       progress: { milestones: milestoneProgress, slices: sliceProgress, tasks: taskProgress },
     };
   }
 
   const activeTask: ActiveRef = { id: activeTaskRow.id, title: activeTaskRow.title };
-
-  const tasksDir = resolveTasksDir(basePath, activeMilestone.id, activeSlice.id);
-  if (tasksDir && existsSync(tasksDir) && tasks.length > 0) {
-    const allFiles = readdirSync(tasksDir).filter(f => f.endsWith(".md"));
-    if (allFiles.length === 0) {
-      return {
-        activeMilestone, activeSlice, activeTask: null,
-        phase: 'planning', recentDecisions: [], blockers: [],
-        nextAction: `Task plan files missing for ${activeSlice.id}. Run plan-slice to generate task plans.`,
-        registry, requirements,
-        progress: { milestones: milestoneProgress, slices: sliceProgress, tasks: taskProgress },
-      };
-    }
-  }
 
   // ── Quality gate evaluation check ──────────────────────────────────
   // Pause before execution only when gates owned by the `gate-evaluate`

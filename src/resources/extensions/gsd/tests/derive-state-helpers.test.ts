@@ -1,12 +1,9 @@
-// GSD Extension — Tests for extracted deriveStateFromDb helper functions
+// GSD Extension — Tests for DB-authoritative deriveStateFromDb behavior
 // Copyright (c) 2026 Jeremy McSpadden <jeremy@fluxlabs.net>
 //
-// Tests the composable helpers extracted from deriveStateFromDb:
-//   reconcileDiskToDb, buildCompletenessSet, buildRegistryAndFindActive,
-//   handleNoActiveMilestone, resolveSliceDependencies, reconcileSliceTasks,
-//   detectBlockers, checkReplanTrigger, checkInterruptedWork
-//
-// Helpers are private — exercised through deriveStateFromDb integration.
+// Private helper behavior is exercised through deriveStateFromDb integration.
+// Markdown files in these tests are projections unless the DB row explicitly
+// makes them authoritative.
 
 import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,6 +16,7 @@ import {
   openDatabase,
   closeDatabase,
   insertMilestone,
+  insertRequirement,
   insertSlice,
   insertTask,
   updateTaskStatus,
@@ -112,6 +110,20 @@ describe('derive-state-helpers', () => {
 
       openDatabase(':memory:');
       insertMilestone({ id: 'M001', title: 'First', status: 'complete' });
+      insertRequirement({
+        id: 'R001',
+        class: 'functional',
+        status: 'active',
+        description: 'Unmapped',
+        why: 'test',
+        source: 'test',
+        primary_owner: '',
+        supporting_slices: '',
+        validation: '',
+        notes: '',
+        full_content: '',
+        superseded_by: null,
+      });
 
       invalidateStateCache();
       const state = await deriveStateFromDb(base);
@@ -187,8 +199,8 @@ describe('derive-state-helpers', () => {
     }
   });
 
-  // ─── reconcileSliceTasks: plan file imports tasks when DB empty ──────
-  test('reconcileSliceTasks: imports tasks from plan file when DB has zero tasks (#3600)', async () => {
+  // ─── DB-authoritative tasks: plan projection does not import tasks ──────
+  test('deriveStateFromDb: DB-empty task list does not import PLAN tasks', async () => {
     const base = createFixtureBase();
     try {
       writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_CONTENT);
@@ -200,24 +212,23 @@ describe('derive-state-helpers', () => {
       insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
       insertSlice({ id: 'S01', milestoneId: 'M001', title: 'First', status: 'active', risk: 'low', depends: [] });
       insertSlice({ id: 'S02', milestoneId: 'M001', title: 'Second', status: 'pending', risk: 'low', depends: ['S01'] });
-      // No tasks inserted — reconcileSliceTasks should import from plan file
+      // No tasks inserted — PLAN.md is a projection and must not be imported.
 
       invalidateStateCache();
       const state = await deriveStateFromDb(base);
 
-      // Plan has T01 (pending) and T02 (done) — reconciliation imports both
-      assert.equal(state.phase, 'executing', 'task-reconcile: phase is executing (tasks imported)');
-      assert.equal(state.activeTask?.id, 'T01', 'task-reconcile: activeTask is T01');
-      assert.equal(state.progress?.tasks?.total, 2, 'task-reconcile: total tasks = 2');
-      assert.equal(state.progress?.tasks?.done, 1, 'task-reconcile: done tasks = 1 (T02 was [x])');
+      assert.equal(state.phase, 'planning', 'db-empty-tasks: phase is planning');
+      assert.equal(state.activeTask, null, 'db-empty-tasks: no active task');
+      assert.equal(state.progress?.tasks?.total, 0, 'db-empty-tasks: no tasks imported');
+      assert.equal(state.progress?.tasks?.done, 0, 'db-empty-tasks: no completed tasks imported');
     } finally {
       closeDatabase();
       cleanup(base);
     }
   });
 
-  // ─── reconcileSliceTasks: stale task reconciled from disk summary ────
-  test('reconcileSliceTasks: stale pending task reconciled to complete when disk SUMMARY exists (#2514)', async () => {
+  // ─── DB-authoritative tasks: SUMMARY projection does not complete task ────
+  test('deriveStateFromDb: disk SUMMARY does not reconcile pending task', async () => {
     const base = createFixtureBase();
     try {
       writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_CONTENT);
@@ -237,11 +248,9 @@ describe('derive-state-helpers', () => {
       invalidateStateCache();
       const state = await deriveStateFromDb(base);
 
-      // T01 should have been reconciled to complete (SUMMARY exists on disk)
-      // Both tasks complete → phase should be summarizing
-      assert.equal(state.phase, 'summarizing', 'stale-task: phase is summarizing (T01 reconciled)');
-      assert.equal(state.activeTask, null, 'stale-task: no active task (all done)');
-      assert.equal(state.progress?.tasks?.done, 2, 'stale-task: tasks.done = 2');
+      assert.equal(state.phase, 'executing', 'disk-summary-ignored: phase is executing');
+      assert.equal(state.activeTask?.id, 'T01', 'disk-summary-ignored: T01 remains active');
+      assert.equal(state.progress?.tasks?.done, 1, 'disk-summary-ignored: only DB-complete task is done');
     } finally {
       closeDatabase();
       cleanup(base);
@@ -394,23 +403,23 @@ describe('derive-state-helpers', () => {
     }
   });
 
-  // ─── reconcileDiskToDb: disk slices synced into DB (#2533) ──────────
-  test('reconcileDiskToDb: slices in ROADMAP.md but missing from DB are auto-inserted (#2533)', async () => {
+  // ─── DB-authoritative slices: roadmap projection does not insert slices ───
+  test('deriveStateFromDb: ROADMAP slices missing from DB are not auto-inserted', async () => {
     const base = createFixtureBase();
     try {
       writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_CONTENT);
 
       openDatabase(':memory:');
       insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
-      // No slices inserted — reconcileDiskToDb should insert from roadmap
+      // No slices inserted — ROADMAP.md is a projection and must not be imported.
 
       invalidateStateCache();
       const state = await deriveStateFromDb(base);
 
-      // Slices should have been reconciled from roadmap, S01 should be the active slice
-      assert.equal(state.activeMilestone?.id, 'M001', 'slice-reconcile: M001 is active');
-      assert.equal(state.activeSlice?.id, 'S01', 'slice-reconcile: S01 reconciled and active');
-      assert.ok((state.progress?.slices?.total ?? 0) >= 2, 'slice-reconcile: at least 2 slices reconciled');
+      assert.equal(state.activeMilestone?.id, 'M001', 'roadmap-projection: M001 is active');
+      assert.equal(state.activeSlice, null, 'roadmap-projection: no active slice imported');
+      assert.equal(state.phase, 'pre-planning', 'roadmap-projection: no DB slices routes to pre-planning');
+      assert.equal(state.progress?.slices?.total, 0, 'roadmap-projection: no slices imported');
     } finally {
       closeDatabase();
       cleanup(base);

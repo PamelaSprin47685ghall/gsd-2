@@ -135,7 +135,7 @@ test("stopAutoRemote sends SIGTERM to a live process and returns found:true", { 
 
 // ─── Lock path: original project root vs worktree ────────────────────────
 
-test("lock file should be discoverable at project root, not worktree path", () => {
+test("lock file should be discoverable from project root and worktree path", () => {
   const projectRoot = makeTmpBase();
   const worktreePath = join(projectRoot, ".gsd", "worktrees", "M001");
   mkdirSync(join(worktreePath, ".gsd"), { recursive: true });
@@ -149,9 +149,10 @@ test("lock file should be discoverable at project root, not worktree path", () =
     assert.ok(lock, "lock should be found at project root");
     assert.equal(lock!.unitType, "execute-task");
 
-    // Worktree path should NOT have a lock
+    // Worktree path resolves to the same canonical project .gsd lock.
     const worktreeLock = readCrashLock(worktreePath);
-    assert.equal(worktreeLock, null, "lock should NOT exist at worktree path");
+    assert.ok(worktreeLock, "lock should be discoverable via worktree path");
+    assert.equal(worktreeLock!.unitType, "execute-task");
   } finally {
     cleanup(projectRoot);
   }

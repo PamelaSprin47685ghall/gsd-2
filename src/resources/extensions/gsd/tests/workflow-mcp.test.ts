@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -28,6 +28,17 @@ type ElicitPayload = {
 
 function readSrc(file: string): string {
   return readFileSync(join(gsdDir, file), "utf-8");
+}
+
+function listTsFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    const stat = statSync(full);
+    if (stat.isDirectory()) out.push(...listTsFiles(full));
+    else if (entry.endsWith(".ts")) out.push(full);
+  }
+  return out;
 }
 
 function extractElicitPayload(request: unknown): ElicitPayload {
@@ -771,4 +782,16 @@ test("auto phases source enforces workflow compatibility preflight", () => {
 test("workflow transport error guidance includes /gsd mcp init hint", () => {
   const src = readSrc("workflow-mcp.ts");
   assert.match(src, /Please run \/gsd mcp init \./);
+});
+
+test("buildWorkflowMcpServers is only imported by tests or Claude Code MCP boundary code", () => {
+  const offenders: string[] = [];
+  for (const file of listTsFiles(gsdDir)) {
+    const rel = file.slice(gsdDir.length + 1).replace(/\\/g, "/");
+    if (rel === "workflow-mcp.ts" || rel.startsWith("tests/")) continue;
+    const src = readFileSync(file, "utf-8");
+    if (/\bimport\b[\s\S]*\bbuildWorkflowMcpServers\b/.test(src)) offenders.push(rel);
+  }
+
+  assert.deepEqual(offenders, []);
 });

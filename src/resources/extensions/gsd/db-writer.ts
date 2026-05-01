@@ -318,23 +318,6 @@ export async function saveRequirementToDb(
            LIMIT 1`,
         )
         .get({ ':description': fields.description });
-      const previousRow: Requirement | null = existingRow
-        ? {
-            id: existingRow['id'] as string,
-            class: existingRow['class'] as string,
-            status: existingRow['status'] as string,
-            description: existingRow['description'] as string,
-            why: existingRow['why'] as string,
-            source: existingRow['source'] as string,
-            primary_owner: existingRow['primary_owner'] as string,
-            supporting_slices: existingRow['supporting_slices'] as string,
-            validation: existingRow['validation'] as string,
-            notes: existingRow['notes'] as string,
-            full_content: existingRow['full_content'] as string,
-            superseded_by: (existingRow['superseded_by'] as string) ?? null,
-          }
-        : null;
-
       const row = adapter
         .prepare('SELECT MAX(CAST(SUBSTR(id, 2) AS INTEGER)) as max_num FROM requirements')
         .get();
@@ -361,9 +344,9 @@ export async function saveRequirementToDb(
       };
 
       db.upsertRequirement(requirement);
-      return { id: nextId, isNew: !existingRow, previousRow };
+      return { id: nextId };
     });
-    const { id, isNew, previousRow } = txResult;
+    const { id } = txResult;
 
     // Fetch all requirements for full file regeneration
     const adapter = db._getAdapter();
@@ -392,17 +375,7 @@ export async function saveRequirementToDb(
     try {
       await saveFile(filePath, md);
     } catch (diskErr) {
-      logError('manifest', 'disk write failed, rolling back DB row', { fn: 'saveRequirementToDb', error: String((diskErr as Error).message) });
-      try {
-        if (isNew) {
-          db.deleteRequirementById(id);
-        } else if (previousRow) {
-          db.upsertRequirement(previousRow);
-        }
-      } catch (rollbackErr) {
-        logError('manifest', 'SPLIT BRAIN: disk write failed AND DB rollback failed — DB has orphaned row', { fn: 'saveRequirementToDb', id, error: String((rollbackErr as Error).message) });
-      }
-      throw diskErr;
+      logWarning('projection', 'REQUIREMENTS.md projection write failed; DB requirement remains committed', { fn: 'saveRequirementToDb', id, error: String((diskErr as Error).message) });
     }
     invalidateStateCache();
     clearPathCache();
@@ -538,13 +511,7 @@ export async function saveDecisionToDb(
     try {
       await saveFile(filePath, md);
     } catch (diskErr) {
-      logError('manifest', 'disk write failed, rolling back DB row', { fn: 'saveDecisionToDb', error: String((diskErr as Error).message) });
-      try {
-        db.deleteDecisionById(id);
-      } catch (rollbackErr) {
-        logError('manifest', 'SPLIT BRAIN: disk write failed AND DB rollback failed — DB has orphaned row', { fn: 'saveDecisionToDb', id, error: String((rollbackErr as Error).message) });
-      }
-      throw diskErr;
+      logWarning('projection', 'DECISIONS.md projection write failed; DB decision remains committed', { fn: 'saveDecisionToDb', id, error: String((diskErr as Error).message) });
     }
     // #2661: When a decision defers a slice, update the slice status in the DB
     // so the dispatcher skips it. Without this, STATE.md and DECISIONS.md are
@@ -837,9 +804,7 @@ export async function saveArtifactToDb(
       try {
         await saveFile(fullPath, contentToPersist);
       } catch (diskErr) {
-        logError('manifest', 'disk write failed, rolling back DB row', { fn: 'saveArtifactToDb', error: String((diskErr as Error).message) });
-        db.deleteArtifactByPath(opts.path);
-        throw diskErr;
+        logWarning('projection', 'artifact projection write failed; DB artifact remains committed', { fn: 'saveArtifactToDb', path: opts.path, error: String((diskErr as Error).message) });
       }
     }
     // Invalidate file-read caches so deriveState() sees the updated markdown.

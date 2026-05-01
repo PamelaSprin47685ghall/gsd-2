@@ -854,13 +854,9 @@ export const DISPATCH_RULES: DispatchRule[] = [
     // while a slice is still `is_sketch=1`, fall through to a standard
     // plan-slice so the loop doesn't dead-end.
     //
-    // Note on the flag-OFF downgrade: plan-slice does not explicitly clear
-    // `is_sketch`. After it writes PLAN.md, the auto-heal in state.ts's
-    // `deriveStateFromDb` (via `autoHealSketchFlags`) flips the flag on the
-    // next iteration. That implicit coupling is the sole mechanism that
-    // reconciles `is_sketch=1` on the plan-slice path — do not remove the
-    // auto-heal without either adding an explicit `setSliceSketchFlag(..., false)`
-    // call here or doing so inside the plan-slice tool handler.
+    // Note on the flag-OFF downgrade: DB slice metadata is authoritative.
+    // PLAN.md is only a projection, so plan-slice/refine-slice handlers must
+    // explicitly clear `is_sketch` when a sketch becomes a full plan.
     name: "refining → refine-slice",
     match: async ({ state, mid, midTitle, basePath, prefs, sessionContextWindow, modelRegistry, sessionProvider }) => {
       if (state.phase !== "refining") return null;

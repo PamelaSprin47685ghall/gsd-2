@@ -1,9 +1,8 @@
 // GSD Markdown Renderer — DB → Markdown file generation
 //
 // Transforms DB state into correct markdown files on disk.
-// Each render function reads from DB (with disk fallback),
-// patches content to match DB status, writes atomically to disk,
-// stores updated content in the artifacts table, and invalidates caches.
+// Each render function reads from DB, writes a markdown projection to disk,
+// stores generated content in the artifacts table, and invalidates caches.
 //
 // Critical invariant: rendered markdown must round-trip through
 // parseRoadmap(), parsePlan(), parseSummary() in files.ts.
@@ -85,9 +84,9 @@ function taskSummaryForSlicePlan(description: string): string {
 }
 
 /**
- * Load artifact content from DB first, falling back to reading from disk.
- * On disk fallback, stores the content in the artifacts table for future use.
- * Returns null if content is unavailable from both sources.
+ * Load artifact content from DB first, falling back to reading from disk as a
+ * legacy projection compatibility path. Disk fallback content is deliberately
+ * not stored back into DB; markdown is not authoritative during runtime.
  */
 function loadArtifactContent(
   artifactPath: string,
@@ -105,7 +104,8 @@ function loadArtifactContent(
     return artifact.full_content;
   }
 
-  // Fall back to disk
+  // Fall back to disk for legacy projection patching only. Do not import this
+  // content into DB; missing/stale DB artifacts should be regenerated from rows.
   if (!absPath) {
     process.stderr.write(
       `markdown-renderer: artifact not found in DB or on disk: ${artifactPath}\n`,
@@ -119,21 +119,6 @@ function loadArtifactContent(
   } catch {
     logWarning("renderer", `cannot read file from disk: ${absPath}`);
     return null;
-  }
-
-  // Store in DB for future use (graceful degradation path)
-  try {
-    insertArtifact({
-      path: artifactPath,
-      artifact_type: opts.artifact_type,
-      milestone_id: opts.milestone_id,
-      slice_id: opts.slice_id ?? null,
-      task_id: opts.task_id ?? null,
-      full_content: content,
-    });
-  } catch {
-    // Non-fatal: we have the content, DB storage is best-effort
-    logWarning("renderer", `failed to store disk fallback in DB: ${artifactPath}`);
   }
 
   return content;
@@ -517,10 +502,8 @@ export async function renderRoadmapCheckboxes(
   }
 
   if (!content) {
-    process.stderr.write(
-      `markdown-renderer: no roadmap content available for ${milestoneId}\n`,
-    );
-    return false;
+    await renderRoadmapFromDb(basePath, milestoneId);
+    return true;
   }
 
   // Apply checkbox patches for each slice
@@ -590,10 +573,8 @@ export async function renderPlanCheckboxes(
   }
 
   if (!content) {
-    process.stderr.write(
-      `markdown-renderer: no plan content available for ${milestoneId}/${sliceId}\n`,
-    );
-    return false;
+    await renderPlanFromDb(basePath, milestoneId, sliceId);
+    return true;
   }
 
   // Apply checkbox patches for each task

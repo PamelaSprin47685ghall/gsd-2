@@ -10,12 +10,13 @@
  */
 
 import { readdirSync, existsSync, realpathSync, Dirent } from "node:fs";
-import { join, dirname, normalize } from "node:path";
+import { join, dirname, normalize, resolve } from "node:path";
 import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { nativeScanGsdTree, type GsdTreeEntry } from "./native-parser-bridge.js";
 import { DIR_CACHE_MAX } from "./constants.js";
 import { gsdHome } from "./gsd-home.js";
+import { isGsdWorktreePath, resolveWorktreeProjectRoot } from "./worktree-root.js";
 
 // ─── Directory Listing Cache ──────────────────────────────────────────────────
 
@@ -286,6 +287,56 @@ const LEGACY_GSD_ROOT_FILES: Record<GSDRootFileKey, string> = {
 
 const gsdRootCache = new Map<string, string>();
 
+export interface GsdPathContract {
+  /** Canonical repo/project root where authoritative state lives. */
+  projectRoot: string;
+  /** Current execution root, which may be an auto-worktree. */
+  workRoot: string;
+  /** Canonical authoritative .gsd directory. */
+  projectGsd: string;
+  /** Legacy worktree-local .gsd projection directory, when applicable. */
+  worktreeGsd: string | null;
+  /** Canonical authoritative SQLite DB path. */
+  projectDb: string;
+  /** True when workRoot is inside a GSD worktree layout. */
+  isWorktree: boolean;
+}
+
+export function resolveGsdPathContract(
+  workRoot: string,
+  originalProjectRoot?: string | null,
+): GsdPathContract {
+  const resolvedWorkRoot = resolve(workRoot || process.cwd());
+  const isWorktree = isGsdWorktreePath(resolvedWorkRoot);
+  if (isWorktree && !originalProjectRoot?.trim()) {
+    const externalMatch = /[/\\]\.gsd[/\\]projects[/\\][^/\\]+[/\\]worktrees(?:[/\\]|$)/.exec(resolvedWorkRoot);
+    if (externalMatch) {
+      const worktreesIdx = externalMatch[0].search(/[/\\]worktrees(?:[/\\]|$)/);
+      const projectGsd = resolvedWorkRoot.slice(0, externalMatch.index + worktreesIdx);
+      return {
+        projectRoot: dirname(dirname(projectGsd)),
+        workRoot: resolvedWorkRoot,
+        projectGsd,
+        worktreeGsd: join(resolvedWorkRoot, ".gsd"),
+        projectDb: join(projectGsd, "gsd.db"),
+        isWorktree,
+      };
+    }
+  }
+  const projectRoot = resolve(resolveWorktreeProjectRoot(resolvedWorkRoot, originalProjectRoot));
+  const projectGsd = join(projectRoot, ".gsd");
+  const worktreeGsd = isWorktree ? join(resolvedWorkRoot, ".gsd") : null;
+
+  return {
+    projectRoot,
+    workRoot: resolvedWorkRoot,
+    projectGsd,
+    worktreeGsd,
+    projectDb: join(projectGsd, "gsd.db"),
+    isWorktree,
+  };
+}
+
 /** Exported for tests only — do not call in production code. */
 export function _clearGsdRootCache(): void {
   gsdRootCache.clear();
@@ -378,6 +429,9 @@ function isInsideGsdWorktree(p: string): boolean {
 }
 
 function probeGsdRoot(rawBasePath: string): string {
+  const contract = resolveGsdPathContract(rawBasePath);
+  if (contract.isWorktree) return contract.projectGsd;
+
   // 1. Fast path — check the input path directly
   const local = join(rawBasePath, ".gsd");
   if (existsSync(local)) return local;

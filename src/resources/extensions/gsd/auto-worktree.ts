@@ -32,7 +32,7 @@ import {
 import { atomicWriteSync } from "./atomic-write.js";
 import { execFileSync } from "node:child_process";
 import { safeCopy, safeCopyRecursive } from "./safe-fs.js";
-import { gsdRoot } from "./paths.js";
+import { gsdRoot, resolveGsdPathContract } from "./paths.js";
 import {
   createWorktree,
   removeWorktree,
@@ -349,8 +349,9 @@ export function syncProjectRootToWorktree(
   if (!worktreePath_ || !projectRoot || worktreePath_ === projectRoot) return;
   if (!milestoneId) return;
 
-  const prGsd = join(projectRoot, ".gsd");
-  const wtGsd = join(worktreePath_, ".gsd");
+  const contract = resolveGsdPathContract(worktreePath_, projectRoot);
+  const prGsd = contract.projectGsd;
+  const wtGsd = contract.worktreeGsd ?? join(worktreePath_, ".gsd");
 
   // When .gsd is a symlink to the same external directory in both locations,
   // cpSync rejects the copy because source === destination (ERR_FS_CP_EINVAL).
@@ -390,11 +391,9 @@ export function syncProjectRootToWorktree(
     { force: true },
   );
 
-  // Delete worktree gsd.db ONLY if it is empty (0 bytes).
-  // An empty DB is stale/corrupt and should be rebuilt (#853).
-  // A non-empty DB was populated by gsd-migrate on respawn and must be
-  // preserved — deleting it truncates the file to 0 bytes when
-  // openDatabase re-creates it, causing "no such table" failures (#2815).
+  // Delete a legacy worktree-local gsd.db ONLY if it is empty (0 bytes).
+  // Runtime opens contract.projectDb; this cleanup only removes corrupt
+  // pre-upgrade local DB projections.
   try {
     const wtDb = join(wtGsd, "gsd.db");
     let deleteSidecars = false;
@@ -441,8 +440,9 @@ export function syncStateToProjectRoot(
   if (!worktreePath_ || !projectRoot || worktreePath_ === projectRoot) return;
   if (!milestoneId) return;
 
-  const wtGsd = join(worktreePath_, ".gsd");
-  const prGsd = join(projectRoot, ".gsd");
+  const contract = resolveGsdPathContract(worktreePath_, projectRoot);
+  const wtGsd = contract.worktreeGsd ?? join(worktreePath_, ".gsd");
+  const prGsd = contract.projectGsd;
 
   // When .gsd is a symlink to the same external directory in both locations,
   // cpSync rejects the copy because source === destination (ERR_FS_CP_EINVAL).
@@ -645,8 +645,9 @@ export function syncGsdStateToWorktree(
   mainBasePath: string,
   worktreePath_: string,
 ): { synced: string[] } {
-  const mainGsd = gsdRoot(mainBasePath);
-  const wtGsd = gsdRoot(worktreePath_);
+  const contract = resolveGsdPathContract(worktreePath_, mainBasePath);
+  const mainGsd = contract.projectGsd;
+  const wtGsd = contract.worktreeGsd ?? join(worktreePath_, ".gsd");
   const synced: string[] = [];
 
   // If both resolve to the same directory (symlink), no sync needed
@@ -814,8 +815,9 @@ export function syncWorktreeStateBack(
   worktreePath: string,
   milestoneId: string,
 ): { synced: string[] } {
-  const mainGsd = gsdRoot(mainBasePath);
-  const wtGsd = gsdRoot(worktreePath);
+  const contract = resolveGsdPathContract(worktreePath, mainBasePath);
+  const mainGsd = contract.projectGsd;
+  const wtGsd = contract.worktreeGsd ?? join(worktreePath, ".gsd");
   const synced: string[] = [];
 
   // If both resolve to the same directory (symlink), no sync needed
@@ -829,7 +831,7 @@ export function syncWorktreeStateBack(
   // files. This handles in-flight worktrees that were created before the
   // upgrade to shared WAL mode.
   const wtLocalDb = join(wtGsd, "gsd.db");
-  const mainDb = join(mainGsd, "gsd.db");
+  const mainDb = contract.projectDb;
   if (existsSync(wtLocalDb) && existsSync(mainDb)) {
     try {
       reconcileWorktreeDb(mainDb, wtLocalDb);
@@ -891,8 +893,9 @@ function syncCurrentMilestoneStateAfterMerge(
   worktreePath: string,
   milestoneId: string,
 ): { synced: string[] } {
-  const mainGsd = gsdRoot(mainBasePath);
-  const wtGsd = gsdRoot(worktreePath);
+  const contract = resolveGsdPathContract(worktreePath, mainBasePath);
+  const mainGsd = contract.projectGsd;
+  const wtGsd = contract.worktreeGsd ?? join(worktreePath, ".gsd");
   const synced: string[] = [];
 
   if (isSamePath(mainGsd, wtGsd)) return { synced };
@@ -1710,8 +1713,9 @@ export function mergeMilestoneToMain(
   // database (#2823).
   if (isDbAvailable()) {
     try {
-      const worktreeDbPath = join(worktreeCwd, ".gsd", "gsd.db");
-      const mainDbPath = join(originalBasePath_, ".gsd", "gsd.db");
+      const contract = resolveGsdPathContract(worktreeCwd, originalBasePath_);
+      const worktreeDbPath = join(contract.worktreeGsd ?? join(worktreeCwd, ".gsd"), "gsd.db");
+      const mainDbPath = contract.projectDb;
       if (!isSamePath(worktreeDbPath, mainDbPath)) {
         reconcileWorktreeDb(mainDbPath, worktreeDbPath);
       }
