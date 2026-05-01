@@ -86,8 +86,8 @@ describe("guided-flow → auto-prompts consolidation (#5183)", () => {
     assert.ok(prompt.includes(TID), "must mention task id");
     assert.ok(prompt.includes(T_TITLE), "must mention task title");
     assert.ok(
-      prompt.includes("gsd_complete_task"),
-      "must instruct calling the canonical gsd_complete_task tool",
+      prompt.includes("gsd_task_complete"),
+      "must instruct calling the canonical gsd_task_complete tool",
     );
     assert.ok(
       prompt.includes(base),
@@ -110,8 +110,8 @@ describe("guided-flow → auto-prompts consolidation (#5183)", () => {
     assert.ok(prompt.includes(SID), "must mention slice id");
     assert.ok(prompt.includes(S_TITLE), "must mention slice title");
     assert.ok(
-      prompt.includes("gsd_complete_slice"),
-      "must instruct calling gsd_complete_slice (was in guided-complete-slice.md)",
+      prompt.includes("gsd_slice_complete"),
+      "must instruct calling gsd_slice_complete (was in guided-complete-slice.md)",
     );
     assert.ok(
       prompt.includes(base),
