@@ -928,17 +928,27 @@ function saveLedger(base: string, data: MetricsLedger): void {
   const path = metricsPath(base);
   const lockPath = `${path}.lock`;
   const acquired = acquireLock(lockPath);
-  try {
-    // Read current on-disk state and merge with worker's in-memory units.
-    // Worker units take precedence on conflict (by finishedAt in deduplicateUnits).
-    const onDisk = loadJsonFileOrNull(path, isMetricsLedger);
-    if (onDisk && onDisk.units.length > 0) {
-      const merged = deduplicateUnits([...onDisk.units, ...data.units]);
-      saveJsonFile(path, { ...data, units: merged });
-    } else {
-      saveJsonFile(path, data);
+  if (acquired) {
+    try {
+      // Read current on-disk state and merge with worker's in-memory units.
+      // Worker units take precedence on conflict (by finishedAt in deduplicateUnits).
+      const onDisk = loadJsonFileOrNull(path, isMetricsLedger);
+      if (onDisk && onDisk.units.length > 0) {
+        const merged = deduplicateUnits([...onDisk.units, ...data.units]);
+        saveJsonFile(path, { ...data, units: merged });
+      } else {
+        saveJsonFile(path, data);
+      }
+    } finally {
+      releaseLock(lockPath);
     }
-  } finally {
-    if (acquired) releaseLock(lockPath);
+  } else {
+    // Lock could not be acquired within the timeout. Fall back to a direct
+    // write (no cross-process merge) to avoid losing this worker's data
+    // entirely. A concurrent writer may overwrite us, but that is preferable
+    // to a torn write caused by two writers simultaneously executing the
+    // read-merge-write sequence without mutual exclusion.
+    logWarning("metrics", "saveLedger: lock not acquired — falling back to direct write (no merge)");
+    saveJsonFile(path, data);
   }
 }
