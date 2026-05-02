@@ -954,7 +954,7 @@ function saveLedger(base: string, data: MetricsLedger): void {
     // entirely. A concurrent writer may overwrite us, but that is preferable
     // to a torn write caused by two writers simultaneously executing the
     // read-merge-write sequence without mutual exclusion.
-    logWarning("metrics", "saveLedger: lock not acquired — falling back to direct write (no merge)");
+    logWarning("fs", "saveLedger: lock not acquired — falling back to direct write (no merge)");
     saveJsonFile(path, data);
   }
 }
