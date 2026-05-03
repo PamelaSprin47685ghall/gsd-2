@@ -268,9 +268,12 @@ function getActiveWorkspace(): GsdWorkspace | null {
 
 function clearProjectRootStateFiles(basePath: string, milestoneId: string): void {
   const gsdDir = gsdRoot(basePath);
+  // Phase C pt 2: auto.lock removed from this list — the file is gone
+  // (migrated to the workers + unit_dispatches + runtime_kv tables). The
+  // remaining transient files (STATE.md, {MID}-META.json) are still
+  // worth removing on teardown.
   const transientFiles = [
     join(gsdDir, "STATE.md"),
-    join(gsdDir, "auto.lock"),
     join(gsdDir, "milestones", milestoneId, `${milestoneId}-META.json`),
   ];
 

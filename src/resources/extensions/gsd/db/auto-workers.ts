@@ -24,6 +24,7 @@ import {
   transaction,
   insertAuditEvent,
 } from "../gsd-db.js";
+import { normalizeRealPath } from "../paths.js";
 
 const HEARTBEAT_TTL_SECONDS = 60;
 // Version label is for diagnostics only — embedded in audit_events and
@@ -177,6 +178,19 @@ export function getActiveAutoWorkers(): readonly AutoWorkerRow[] {
   return rows;
 }
 
+/** Return all worker rows regardless of status or TTL. */
+export function getAllAutoWorkers(): readonly AutoWorkerRow[] {
+  if (!isDbAvailable()) return [];
+  const db = _getAdapter()!;
+  const rows = db.prepare(
+    `SELECT worker_id, host, pid, started_at, version,
+            last_heartbeat_at, status, project_root_realpath
+     FROM workers
+     ORDER BY started_at`,
+  ).all() as unknown as AutoWorkerRow[];
+  return rows;
+}
+
 /**
  * Look up a single worker row. Returns null if no row exists.
  */
@@ -194,4 +208,66 @@ export function getAutoWorker(workerId: string): AutoWorkerRow | null {
 /** Test/janitor helper: TTL constant exported for callers to compute expirations. */
 export function autoWorkerHeartbeatTtlSeconds(): number {
   return HEARTBEAT_TTL_SECONDS;
+}
+
+function isWorkerProcessAlive(candidate: Pick<AutoWorkerRow, "host" | "pid">): boolean {
+  const pid = candidate.pid;
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (candidate.host !== hostname()) return false;
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EPERM") return true;
+    return false;
+  }
+}
+
+/**
+ * Phase C pt 2 — find the most recently active worker for a project root
+ * whose heartbeat has lapsed (the "previous crashed session" indicator).
+ *
+ * Used by crash-recovery.ts:readCrashLock to detect when a prior auto-mode
+ * session ended without cleanup. Workers are only treated as stale after
+ * their heartbeat has lapsed and the OS PID liveness check says the process
+ * is no longer alive.
+ *
+ * Returns null if no stale worker exists for this project root.
+ */
+export function findStaleWorkerForProject(
+  projectRootRealpath: string,
+): AutoWorkerRow | null {
+  if (!isDbAvailable()) return null;
+  const db = _getAdapter()!;
+  const cutoffMs = Date.now() - HEARTBEAT_TTL_SECONDS * 1000;
+  const cutoffIso = new Date(cutoffMs).toISOString();
+  const row = db.prepare(
+    `SELECT worker_id, host, pid, started_at, version,
+            last_heartbeat_at, status, project_root_realpath
+     FROM workers
+     WHERE project_root_realpath = :project_root
+       AND status = 'active'
+       AND last_heartbeat_at < :cutoff
+     ORDER BY started_at DESC
+     LIMIT 1`,
+  ).get({ ":project_root": projectRootRealpath, ":cutoff": cutoffIso }) as AutoWorkerRow | undefined;
+  if (row && !isWorkerProcessAlive(row)) return row;
+
+  // Older rows and external fixtures may have captured a non-realpath spelling
+  // of the same project root, e.g. /var/... vs /private/var/... on macOS.
+  const canonicalProjectRoot = normalizeRealPath(projectRootRealpath);
+  const staleRows = db.prepare(
+    `SELECT worker_id, host, pid, started_at, version,
+            last_heartbeat_at, status, project_root_realpath
+     FROM workers
+     WHERE status = 'active'
+       AND last_heartbeat_at < :cutoff
+     ORDER BY started_at DESC`,
+  ).all({ ":cutoff": cutoffIso }) as unknown as AutoWorkerRow[];
+  return staleRows.find(
+    (candidate) =>
+      normalizeRealPath(candidate.project_root_realpath) === canonicalProjectRoot
+      && !isWorkerProcessAlive(candidate),
+  ) ?? null;
 }

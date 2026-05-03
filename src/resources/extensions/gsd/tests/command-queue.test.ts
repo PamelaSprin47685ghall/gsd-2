@@ -127,3 +127,15 @@ test("completed commands cannot be reclaimed or completed by a different worker"
   const row = getCommand(id)!;
   assert.equal(row.result_json, JSON.stringify({ result: 1 }));
 });
+
+test("completeCommand does not complete an unclaimed command", (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+
+  const id = enqueueCommand({ targetWorker: "w", command: "x" });
+  completeCommand(id, "w", { result: 1 });
+  const row = getCommand(id)!;
+  assert.equal(row.completed_at, null);
+  assert.equal(row.result_json, null);
+});

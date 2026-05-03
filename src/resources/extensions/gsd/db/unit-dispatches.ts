@@ -78,7 +78,8 @@ export interface RecordClaimInput {
 
 export type RecordClaimResult =
   | { ok: true; dispatchId: number }
-  | { ok: false; error: "already_active"; existingId: number; existingStatus: DispatchStatus; existingWorker: string };
+  | { ok: false; error: "already_active"; existingId: number; existingStatus: DispatchStatus; existingWorker: string }
+  | { ok: false; error: "stale_lease"; milestoneId: string; workerId: string; milestoneLeaseToken: number };
 
 function isAlreadyActiveConstraintError(err: unknown): boolean {
   const code =
@@ -111,6 +112,28 @@ export function recordDispatchClaim(input: RecordClaimInput): RecordClaimResult 
 
   return transaction((): RecordClaimResult => {
     const db = _getAdapter()!;
+
+    const lease = db.prepare(
+      `SELECT fencing_token
+       FROM milestone_leases
+       WHERE milestone_id = :milestone_id
+         AND worker_id = :worker_id
+         AND fencing_token = :token
+         AND status = 'held'`,
+    ).get({
+      ":milestone_id": input.milestoneId,
+      ":worker_id": input.workerId,
+      ":token": input.milestoneLeaseToken,
+    }) as { fencing_token: number } | undefined;
+    if (!lease) {
+      return {
+        ok: false,
+        error: "stale_lease",
+        milestoneId: input.milestoneId,
+        workerId: input.workerId,
+        milestoneLeaseToken: input.milestoneLeaseToken,
+      };
+    }
 
     try {
       const result = db.prepare(
@@ -289,12 +312,26 @@ export function markStuck(dispatchId: number, reason: string): void {
   if (!isDbAvailable()) return;
   const now = new Date().toISOString();
   const db = _getAdapter()!;
-  transaction(() => {
-    db.prepare(
+  const result = transaction(() => {
+    return db.prepare(
       `UPDATE unit_dispatches
        SET status = 'stuck', ended_at = :ended_at, exit_reason = :reason
-       WHERE id = :id AND status IN ('claimed','running')`,
+       WHERE id = :id
+         AND status IN ('claimed','running')`,
     ).run({ ":id": dispatchId, ":ended_at": now, ":reason": reason });
+  });
+  const changes =
+    typeof (result as { changes?: unknown }).changes === "number"
+      ? (result as { changes: number }).changes
+      : 0;
+  if (changes <= 0) return;
+  insertAuditEvent({
+    eventId: randomUUID(),
+    traceId: dispatchId.toString(),
+    category: "orchestration",
+    type: "dispatch-stuck",
+    ts: now,
+    payload: { dispatchId, reason },
   });
 }
 
@@ -370,6 +407,26 @@ export function getRecentUnitKeysForWorker(
      LIMIT :limit`,
   ).all({ ":worker_id": workerId, ":limit": limit }) as Array<{ unit_id: string }>;
   // Reverse so callers consume oldest-first (sliding-window semantics).
+  return rows.reverse().map((r) => ({ key: r.unit_id }));
+}
+
+export function getRecentUnitKeysForProjectRoot(
+  projectRootRealpath: string,
+  limit = 20,
+): Array<{ key: string }> {
+  if (!isDbAvailable()) return [];
+  const db = _getAdapter()!;
+  const rows = db.prepare(
+    `SELECT ud.unit_id
+     FROM unit_dispatches ud
+     INNER JOIN workers w ON w.worker_id = ud.worker_id
+     WHERE w.project_root_realpath = :project_root_realpath
+     ORDER BY ud.started_at DESC, ud.id DESC
+     LIMIT :limit`,
+  ).all({
+    ":project_root_realpath": projectRootRealpath,
+    ":limit": limit,
+  }) as Array<{ unit_id: string }>;
   return rows.reverse().map((r) => ({ key: r.unit_id }));
 }
 

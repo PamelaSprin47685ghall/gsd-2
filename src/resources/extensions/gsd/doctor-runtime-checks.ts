@@ -8,6 +8,8 @@ import { deriveState, isGhostMilestone, isReusableGhostMilestone } from "./state
 import { saveFile } from "./files.js";
 import { nativeIsRepo, nativeForEachRef, nativeUpdateRef } from "./native-git-bridge.js";
 import { readCrashLock, isLockProcessAlive, clearLock } from "./crash-recovery.js";
+import { getActiveAutoWorkers } from "./db/auto-workers.js";
+import { normalizeRealPath } from "./paths.js";
 import { ensureGitignore, isGsdGitignored } from "./gitignore.js";
 import { readAllSessionStatuses, isSessionStale, removeSessionStatus } from "./session-status-io.js";
 import { recoverFailedMigration } from "./migrate-external.js";
@@ -35,6 +37,9 @@ export async function checkRuntimeHealth(
   const root = gsdRoot(basePath);
 
   // ── Stale crash lock ──────────────────────────────────────────────────
+  // Phase C pt 2: the lock state lives in the workers + unit_dispatches
+  // tables now, not auto.lock. readCrashLock synthesizes a LockData from
+  // the DB; isLockProcessAlive is a pure OS PID check.
   try {
     const lock = readCrashLock(basePath);
     if (lock) {
@@ -45,14 +50,14 @@ export async function checkRuntimeHealth(
           code: "stale_crash_lock",
           scope: "project",
           unitId: "project",
-          message: `Stale auto.lock from PID ${lock.pid} (started ${lock.startedAt}, was executing ${lock.unitType} ${lock.unitId}) — process is no longer running`,
-          file: ".gsd/auto.lock",
+          message: `Stale auto-mode worker (PID ${lock.pid}, started ${lock.startedAt}, was executing ${lock.unitType} ${lock.unitId}) — process is no longer running`,
+          file: "<workers table>",
           fixable: true,
         });
 
         if (shouldFix("stale_crash_lock")) {
           clearLock(basePath);
-          fixesApplied.push("cleared stale auto.lock");
+          fixesApplied.push("cleared stale auto-mode worker state");
         }
       }
     }
@@ -70,9 +75,22 @@ export async function checkRuntimeHealth(
     if (existsSync(lockDir)) {
       const statRes = statSync(lockDir);
       if (statRes.isDirectory()) {
-        // Check if any live process actually holds this lock
-        const lock = readCrashLock(basePath);
-        const lockHolderAlive = lock ? isLockProcessAlive(lock) : false;
+        // Phase C pt 2: "any live process holds the lock?" check now means
+        // "is any worker registered with status='active' AND a fresh
+        // heartbeat for this project?" — readCrashLock returns null for
+        // healthy live workers (it surfaces stale ones only), so we must
+        // consult getActiveAutoWorkers directly.
+        const projectRoot = normalizeRealPath(basePath);
+        const activeWorkers = getActiveAutoWorkers().filter(
+          (w) => w.project_root_realpath === projectRoot && isLockProcessAlive({
+            pid: w.pid,
+            startedAt: w.started_at,
+            unitType: "starting",
+            unitId: "bootstrap",
+            unitStartedAt: w.started_at,
+          }),
+        );
+        const lockHolderAlive = activeWorkers.length > 0;
         if (!lockHolderAlive) {
           issues.push({
             severity: "error",

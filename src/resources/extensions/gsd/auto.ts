@@ -22,8 +22,14 @@ import type { GSDState } from "./types.js";
 import {
   assessInterruptedSession,
   readPausedSessionMetadata,
+  PAUSED_SESSION_KV_KEY,
   type InterruptedSessionAssessment,
+  type PausedSessionMetadata,
 } from "./interrupted-session.js";
+import {
+  setRuntimeKv,
+  deleteRuntimeKv,
+} from "./db/runtime-kv.js";
 import { getManifestStatus } from "./files.js";
 export { inlinePriorMilestoneSummary } from "./files.js";
 import { collectSecretsFromManifest } from "../get-secrets-from-user.js";
@@ -1136,11 +1142,11 @@ export async function stopAuto(
     }
 
     // ── Step 12: Remove paused-session metadata (#1383) ──
+    // Phase C pt 2: deleteRuntimeKv replaces unlinkSync(paused-session.json).
     try {
-      const pausedPath = join(gsdRoot(s.originalBasePath || s.basePath), "runtime", "paused-session.json");
-      if (existsSync(pausedPath)) unlinkSync(pausedPath);
+      deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
     } catch (err) { /* non-fatal */
-      logWarning("engine", `file unlink failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+      logWarning("engine", `paused-session DB delete failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
     }
 
     // ── Step 13: Restore original model + thinking (before reset clears IDs) ──
@@ -1241,10 +1247,12 @@ export async function pauseAuto(
   s.pausedSessionFile = normalizeSessionFilePath(ctx?.sessionManager?.getSessionFile() ?? null);
 
   // Persist paused-session metadata so resume survives /exit (#1383).
-  // The fresh-start bootstrap checks for this file and restores worktree context.
+  // Phase C pt 2: persisted to runtime_kv (global scope, key
+  // PAUSED_SESSION_KV_KEY) instead of runtime/paused-session.json. The
+  // fresh-start bootstrap below reads from the same key.
   try {
-    const pausedMeta = {
-      milestoneId: s.currentMilestoneId,
+    const pausedMeta: PausedSessionMetadata = {
+      milestoneId: s.currentMilestoneId ?? undefined,
       worktreePath: isInAutoWorktree(s.basePath) ? s.basePath : null,
       originalBasePath: s.originalBasePath,
       stepMode: s.stepMode,
@@ -1252,20 +1260,15 @@ export async function pauseAuto(
       sessionFile: s.pausedSessionFile,
       unitType: s.currentUnit?.type ?? undefined,
       unitId: s.currentUnit?.id ?? undefined,
-      activeEngineId: s.activeEngineId,
+      activeEngineId: s.activeEngineId ?? undefined,
       activeRunDir: s.activeRunDir,
       autoStartTime: s.autoStartTime,
       milestoneLock: s.sessionMilestoneLock ?? undefined,
     };
-    const runtimeDir = join(gsdRoot(s.originalBasePath || s.basePath), "runtime");
-    atomicWriteSync(
-      join(runtimeDir, "paused-session.json"),
-      JSON.stringify(pausedMeta, null, 2),
-      "utf-8",
-    );
+    setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, pausedMeta);
   } catch (err) {
     // Non-fatal — resume will still work via full bootstrap, just without worktree context
-    logWarning("engine", `paused-session file write failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+    logWarning("engine", `paused-session DB write failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
   }
 
   // Close out the current unit so its runtime record doesn't stay at "dispatched"
@@ -1548,8 +1551,10 @@ export async function startAuto(
     ctx.ui.notify("Recovered unfinished migration (.gsd.migrating → .gsd).", "info");
   }
 
-  const freshStartAssessment = interruptedAssessment
-    ?? await assessInterruptedSession(base);
+  const freshStartAssessment = await (interruptedAssessment
+    ?? (() => {
+      return ensureDbOpen(base).then(() => assessInterruptedSession(base));
+    })());
 
   if (freshStartAssessment.classification === "running") {
     const pid = freshStartAssessment.lock?.pid;
@@ -1564,10 +1569,20 @@ export async function startAuto(
 
   // If resuming from paused state, just re-activate and dispatch next unit.
   // Check persisted paused-session first (#1383) — survives /exit.
+  // Phase C pt 2: persisted in runtime_kv (global scope) instead of
+  // runtime/paused-session.json. The `clearPausedSession` helper
+  // replaces every prior unlinkSync(pausedPath) call.
+  const clearPausedSession = (logTag: string): void => {
+    try {
+      deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
+    } catch (err) {
+      logWarning("session", `${logTag}: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+    }
+  };
+
   if (!s.paused) {
     try {
       const meta = freshStartAssessment.pausedSession ?? readPausedSessionMetadata(base);
-      const pausedPath = join(gsdRoot(base), "runtime", "paused-session.json");
       if (meta?.activeEngineId && meta.activeEngineId !== "dev") {
         // Custom workflow resume — restore engine state
         s.activeEngineId = meta.activeEngineId;
@@ -1577,11 +1592,6 @@ export async function startAuto(
         s.autoStartTime = meta.autoStartTime || Date.now();
         s.sessionMilestoneLock = meta.milestoneLock ?? null;
         s.paused = true;
-        try { unlinkSync(pausedPath); } catch (e) {
-          if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-            logWarning("session", `pause file cleanup failed: ${e instanceof Error ? e.message : String(e)}`, { file: "auto.ts" });
-          }
-        }
         ctx.ui.notify(
           `Resuming paused custom workflow${meta.activeRunDir ? ` (${meta.activeRunDir})` : ""}.`,
           "info",
@@ -1622,11 +1632,7 @@ export async function startAuto(
             }
           }
           if (!mDir || summaryIsTerminal) {
-            try { unlinkSync(pausedPath); } catch (err) {
-              if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-                logWarning("session", `pause file cleanup failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
-              }
-            }
+            clearPausedSession("paused-session DB cleanup failed (milestone gone/complete)");
             ctx.ui.notify(
               `Paused milestone ${meta.milestoneId} is ${!mDir ? "missing" : "already complete"}. Starting fresh.`,
               "info",
@@ -1657,22 +1663,15 @@ export async function startAuto(
                 : (s.originalBasePath || base);
               rebuildScope(rawForScope, s.currentMilestoneId);
             }
-            try { unlinkSync(pausedPath); } catch (e) {
-              if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-                logWarning("session", `pause file cleanup failed: ${e instanceof Error ? e.message : String(e)}`, { file: "auto.ts" });
-              }
-            }
             ctx.ui.notify(
               `Resuming paused session for ${meta.milestoneId}${meta.worktreePath && existsSync(meta.worktreePath) ? ` (worktree)` : ""}.`,
               "info",
             );
           }
-        } else if (existsSync(pausedPath)) {
-          try { unlinkSync(pausedPath); } catch (e) {
-            if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-              logWarning("session", `stale pause file cleanup failed: ${e instanceof Error ? e.message : String(e)}`, { file: "auto.ts" });
-            }
-          }
+        } else if (meta) {
+          // Stale paused-session metadata that the assessment chose not to
+          // resume — clean it up so the next bootstrap starts fresh.
+          clearPausedSession("stale paused-session DB cleanup failed");
         }
       }
     } catch (err) {
@@ -1852,20 +1851,23 @@ export async function startAuto(
       s.pausedSessionFile = null;
     }
 
+    captureProjectRootEnv(s.originalBasePath || s.basePath);
+    registerAutoWorkerForSession(s);
     updateSessionLock(
       lockBase(),
       "resuming",
       s.currentMilestoneId ?? "unknown",
     );
-    writeLock(
-      lockBase(),
-      "resuming",
-      s.currentMilestoneId ?? "unknown",
-    );
+    if (s.workerId) {
+      writeLock(
+        lockBase(),
+        "resuming",
+        s.currentMilestoneId ?? "unknown",
+      );
+      clearPausedSession("paused-session DB cleanup failed (resume activation)");
+    }
     pi.events.emit(CMUX_CHANNELS.LOG, { preferences: loadEffectiveGSDPreferences(s.basePath || undefined)?.preferences, message: s.stepMode ? "Step-mode resumed." : "Auto-mode resumed.", level: "progress" });
 
-    captureProjectRootEnv(s.originalBasePath || s.basePath);
-    registerAutoWorkerForSession(s);
     startAutoCommandPolling(s.basePath);
     await runAutoLoopWithUok({
       ctx,

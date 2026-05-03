@@ -53,24 +53,21 @@ describe("teardownAutoWorktree cleanup parity", () => {
     _resetAutoWorktreeOriginalBaseForTests();
   });
 
-  test("STATE.md, auto.lock, and M001-META.json are removed after abort teardown", () => {
+  test("STATE.md and M001-META.json are removed after abort teardown", () => {
+    // Phase C pt 2: auto.lock no longer exists as a file — it migrated
+    // to the workers + unit_dispatches tables. clearProjectRootStateFiles
+    // still removes STATE.md and {MID}-META.json on teardown.
     const gsdDir = join(repoDir, ".gsd");
     const milestonesDir = join(gsdDir, "milestones", "M001");
     mkdirSync(milestonesDir, { recursive: true });
 
     const stateMd = join(gsdDir, "STATE.md");
-    const autoLock = join(gsdDir, "auto.lock");
     const metaJson = join(milestonesDir, "M001-META.json");
 
     writeFileSync(stateMd, "# State\nactive\n");
-    writeFileSync(
-      autoLock,
-      JSON.stringify({ pid: process.pid, unitType: "plan-milestone", unitId: "M001" }),
-    );
     writeFileSync(metaJson, JSON.stringify({ milestoneId: "M001" }));
 
     assert.ok(existsSync(stateMd), "STATE.md exists before teardown");
-    assert.ok(existsSync(autoLock), "auto.lock exists before teardown");
     assert.ok(existsSync(metaJson), "M001-META.json exists before teardown");
 
     // teardownAutoWorktree may throw when git worktree removal fails
@@ -83,7 +80,6 @@ describe("teardownAutoWorktree cleanup parity", () => {
     }
 
     assert.ok(!existsSync(stateMd), "STATE.md removed by teardownAutoWorktree");
-    assert.ok(!existsSync(autoLock), "auto.lock removed by teardownAutoWorktree");
     assert.ok(!existsSync(metaJson), "M001-META.json removed by teardownAutoWorktree");
   });
 

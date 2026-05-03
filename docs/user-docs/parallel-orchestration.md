@@ -138,23 +138,23 @@ Add to `~/.gsd/PREFERENCES.md` or `.gsd/PREFERENCES.md`:
 ```yaml
 ---
 parallel:
-  enabled: false            # Master toggle (default: false)
-  max_workers: 2            # Concurrent workers (1-4, default: 2)
-  budget_ceiling: 50.00     # Aggregate cost limit in dollars (optional)
-  merge_strategy: "per-milestone"  # When to merge: "per-slice" or "per-milestone"
-  auto_merge: "confirm"            # "auto", "confirm", or "manual"
+  enabled: false # Master toggle (default: false)
+  max_workers: 2 # Concurrent workers (1-4, default: 2)
+  budget_ceiling: 50.00 # Aggregate cost limit in dollars (optional)
+  merge_strategy: "per-milestone" # When to merge: "per-slice" or "per-milestone"
+  auto_merge: "confirm" # "auto", "confirm", or "manual"
 ---
 ```
 
 ### Configuration Reference
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `enabled` | boolean | `false` | Master toggle. Must be `true` for `/gsd parallel` commands to work. |
-| `max_workers` | number (1-4) | `2` | Maximum concurrent worker processes. Higher values use more memory and API budget. |
-| `budget_ceiling` | number | none | Aggregate cost ceiling in USD across all workers. When reached, no new units are dispatched. |
-| `merge_strategy` | `"per-slice"` or `"per-milestone"` | `"per-milestone"` | When worktree changes merge back to main. Per-milestone waits for the full milestone to complete. |
-| `auto_merge` | `"auto"`, `"confirm"`, `"manual"` | `"confirm"` | How merge-back is handled. `confirm` prompts before merging. `manual` requires explicit `/gsd parallel merge`. |
+| Key              | Type                               | Default           | Description                                                                                                    |
+| ---------------- | ---------------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------- |
+| `enabled`        | boolean                            | `false`           | Master toggle. Must be `true` for `/gsd parallel` commands to work.                                            |
+| `max_workers`    | number (1-4)                       | `2`               | Maximum concurrent worker processes. Higher values use more memory and API budget.                             |
+| `budget_ceiling` | number                             | none              | Aggregate cost ceiling in USD across all workers. When reached, no new units are dispatched.                   |
+| `merge_strategy` | `"per-slice"` or `"per-milestone"` | `"per-milestone"` | When worktree changes merge back to main. Per-milestone waits for the full milestone to complete.              |
+| `auto_merge`     | `"auto"`, `"confirm"`, `"manual"`  | `"confirm"`       | How merge-back is handled. `confirm` prompts before merging. `manual` requires explicit `/gsd parallel merge`. |
 
 ## Commands
 
