@@ -27,54 +27,95 @@ One command. Walk away. Come back to a built project with clean git history.
 
 ---
 
-## What's New in v2.78
+## What's New in v2.79
 
-### Worktree Lifecycle & Forensics
+### DB-Authoritative Runtime State
 
-- **Slice-cadence worktree collapse (#4765)** — new `git.collapse_cadence: "milestone" | "slice"` preference. With `slice`, each validated slice squash-merges to main immediately, shrinking the orphan window from milestone-size to slice-size. Pair with `git.milestone_resquash: true` to collapse per-slice commits into one milestone commit at completion.
-- **Worktree telemetry (#4764)** — new journal events (`worktree-created`, `worktree-merged`, `worktree-orphaned`, `auto-exit`, `canonical-root-redirect`, `slice-merged`, `milestone-resquash`) and a `summarizeWorktreeTelemetry` aggregator that reports orphan breakdowns, merge durations, conflict counts, exit reasons, and unmerged-exit metrics.
-- **`/gsd forensics` worktree section** — surfaces the telemetry above with two new anomalies: `worktree-orphan` and `worktree-unmerged-exit`.
-- **Worktree-aware canonical milestone root (#4761)** — `resolveCanonicalMilestoneRoot` routes validators and cross-session readers through the live worktree, so milestone validation no longer silently reads stale project-root state.
-- **Bootstrap orphan audit (#4762)** — in-progress milestones with commits ahead of main no longer get skipped; the audit emits a warning with commit count and worktree location so interrupted auto-runs are visible.
+- **Auto-mode coordination tables (#5247)** — workers, leases, dispatches, and a command queue are now first-class DB rows, replacing ad-hoc files for cross-process auto coordination.
+- **`auto.lock` + `paused-session.json` → DB (#5250)** — phase C pt 2 of the runtime-state migration. The on-disk lockfile and paused-session JSON are gone; lock acquisition, stale-lock detection, and pause state all live in `gsd.db`.
+- **Stuck-state migration (#5249)** — `copyPlanningArtifacts` / `reconcile` deleted; auto-mode writers canonicalize through the DB instead of mirroring artifacts to disk.
+- **`gsd headless recover`** — non-TTY DB recovery command for unattended environments where the interactive recover flow can't run.
+- **Doctor surfaces DB locks** — `gsd doctor` reports DB-backed stale locks and flags exhausted `run-uat` retry counters so wedged runs are visible without log archaeology.
 
-### Auto Pipeline & Component System
+### Workspace & Worktree Isolation
 
-- **Unified component system** — skills, agents, pipelines, and marketplace are now one component model wired through runtime, dispatch, and telemetry, replacing per-surface plumbing.
-- **UnitContextManifest v2 (#4924, #4934)** — auto dispatch runs through a typed manifest with declarative tools-policy and typed computed artifacts. CI guards the schema so drift fails fast.
-- **Composer migration phase 3 (#4782)** — `complete-slice`, `research-milestone`, `run-uat`, and `reassess-roadmap` now build context through the manifest composer for a consistent shape across units.
-- **Milestone scope classifier + pipeline variants (#4781)** — auto picks a pipeline variant from milestone shape, so research-heavy and execution-heavy milestones no longer share a one-size dispatch path.
-- **Per-unit-type skill manifest resolver (#4779)** — skills wire into specific unit types instead of being globally on, with manifests expanded across the remaining types.
-- **Single-writer-v3 control plane** — closes outstanding gaps in the durable-state writer model so concurrent writers can't desync workflow state.
-- **Opt-in `reassess-roadmap` (#4778)** — gated behind the `skip_clean_reassess` preference per ADR-003 §4; auto no longer triggers reassessment unprompted.
+- **`GsdWorkspace` + `MilestoneScope` handle types** — workspace identity is now an explicit handle threaded through writers, metrics, and the DB connection instead of a module singleton.
+- **Symlink-safe canonicalization** — `deriveState` read root and cache key are canonicalized; path normalization unified on `realpathSync.native`; `gsdRootCache` keys normalized and decoupled from per-turn cache clears; `git-root` anchor guarded against `~/.gsd` resolution.
+- **Worktree-scoped DB + metrics** — `gsd-db` connections and metrics ledgers are scoped by workspace identity, so concurrent milestones in separate worktrees can't cross-contaminate state.
+- **Worktree cwd anchoring** — subagent dispatch anchors to the canonical worktree path, `mergeAndExit` anchors cwd at project root (closes [#5079](https://github.com/gsd-build/GSD-2/issues/5079)), MCP cwd is hardened against drift, and dispatch stops on cwd anchor failures.
+- **Slice isolation through resolver (#5246)** — slice merge isolation routed through the worktree resolver; `originalBase` checks use `isSamePath` instead of string equality; `auto-worktree` validates `milestoneId` match in `ByScope` wrappers.
+- **Worktree CLI commands** — `gsd worktree {list, merge, clean, remove}` exposed in the TUI dispatcher.
 
-### Extensions Framework
+### Deep Planning Mode (Phase 11)
 
-- **Extension lifecycle commands** — `gsd extensions install / update / uninstall / list / info / validate` for npm, git, and local sources, with dependency warnings and user-metadata tracking.
-- **Topological extension load order** — Kahn's-algorithm sort with surfaced `ExtensionLoadWarning`s, so dependent extensions resolve deterministically and misconfigurations are visible instead of silent.
-- **cmux ↔ gsd decoupling** — static cross-imports replaced with a shared `cmux-events` contract and dynamic imports, isolating extension boundaries.
-- **Extracted `@gsd-extensions/google-search` workspace** — first reference extension carved out of core; legacy in-tree source replaced with a deprecation stub.
+- **`/gsd new-project --deep`** — opt-in deep mode for new projects, with `research-decision` and `research-project` dispatch units, deep-mode artifact validators, and gated approval flows that pause the milestone instead of aborting on grounding/discovery questions.
+- **EVAL-REVIEW system** — `/gsd eval-review` command, frontmatter schema, pre-ship soft warning when EVAL-REVIEW status is incomplete, and registration in the catalog + ops dispatcher.
+- **Project-shape-aware discuss depth** — discuss-phase questioning depth scales via the project-shape classifier; tiny apps cap research and auto-skip stale research blockers; deep research is opt-in and blocked while a marker is in flight.
+- **Approval-gate hardening** — deep approval gates verified, opening interview question protected from approval abort, plain-text setup approvals gated, deep setup state guarded against phantom transitions.
 
-### Models, Agent, and UX
+### Auto Pipeline & Dispatch
 
-- **GPT-5.5 Codex support** — added across `gsd` and `pi-ai`, including `xhigh` thinking level for custom GPT-5.5 models.
-- **Auth mode in `/model`** — providers display alongside auth mode for clearer routing.
-- **Permission granularity picker** — Claude Code "Always Allow" prompts let you scope the grant instead of approving the broad case.
-- **Headless auto default → `bypassPermissions` (#4657)** — Claude Code CLI headless auto-mode runs without permission prompts by default.
-- **`skillFilter` for system prompts** — `pi-coding-agent` filters which skills are surfaced in `buildSystemPrompt`, with consumer exceptions guarded.
-- **Visual postinstall (#4641)** — install shows a spinner/banner UX so first-run state is legible.
-- **PR-risk verification** — risk prompt emits a copy-pasteable code block to make follow-up commands one step.
+- **Delegation-policy verdicts** — dispatch actions are annotated with a per-tool background-safety policy verdict; the policy itself is codified instead of inferred per call.
+- **Reactive-execute default** — auto-dispatch defaults to reactive-execute when ≥3 ready tasks are queued, replacing the always-sequential fallback.
+- **Proactive rate limiting (#2996)** — `min_request_interval_ms` preference paces auto-mode requests; the interval is stamped at dispatch.
+- **Manifest-driven skill surfacing** — `auto-prompts` surfaces manifest skills via recommendations + auto-match; planning-dispatch mode added to the unit manifest for slice plan/complete; runtime tools-policy enforced for planning units (#4934).
+- **Subagent telemetry** — dispatch telemetry, stronger prompt guidelines, and model-override threading (`??` consistently used for `modelOverride`).
 
-### Reliability & Safety
+### MCP, Models & Cross-Platform
 
-- **Major git-safety pass** — clarified TOCTOU ancestry guard, atomic sync-lock acquire with PID-verified stale override, `.git/index.lock` force-removal gated by 5-min age, `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` stripped from env overlays, rebase/cherry-pick/revert state detected and aborted in recovery, working tree stashed before `reset --hard` in self-heal/rollback, worktree create guarded against unborn branches, and user hooks + `commit.gpgsign` honored on auto-commits.
-- **Atomic `.gsd/` state writes** — file-locks now actually lock and throw on contention; appends are lock-wrapped to prevent interleaved writes.
-- **Compaction correctness (#4665)** — fixed chunker/truncation mismatch and silent chunk-drops that produced degenerate or empty summaries.
-- **Write-gate (#4950)** — fail-closed depth confirmation, EXDEV-safe snapshot rename, opt-out persistence default, off-by-one max-attempts fix, exception capture in `gate.execute`, and audit/DB rows for unknown gate ids.
-- **Auto state machine** — deterministic policy errors classified non-retriable (#4973), depth-verification bypass for non-interactive sessions, baseline restored between units (#4961), `restoreToolBaseline` gated by `isAutoMode` (#4966).
-- **Slice + crash recovery** — slice orchestrator state persists across crashes; ancestry-guarded force-reset, detached-HEAD refusal, and stash-by-ref recovery.
-- **Empty-turn recovery** — Claude Code CLI tool-block shape canonicalized so empty-turn recovery matches real provider output.
+- **Global MCP config** — `mcp-client` reads `~/.gsd/mcp.json` for user-level MCP server config.
+- **`ask_user_questions` over MCP** — host elicitation tried before remote channel; multi-select array shape preserved; explicit cancellation handled; remote answers normalized into `structuredContent`.
+- **Model routing overhaul** — cross-provider tier resolution, provider-agnostic profile-tier defaults, disabled-provider routing denylist, resolved tier model IDs normalized, and `findModelForTier` with behavioral tests.
+- **Ollama** — configurable probe/request timeouts via env vars (clamped); cloud / long-variant context windows reported correctly.
+- **Windows fixes** — home directory resolved correctly (#5015), `Path` env lookup repaired, Windows-safe env CLI shims, DEP0190 avoided in Claude CLI binary probes, tool-bootstrap skipped when tools are on PATH.
+- **Anthropic prompt-cache preserved (#5019)** — `pi-coding-agent` and `gsd` no longer thrash the cache on dispatch.
 
-See the full [Changelog](./CHANGELOG.md) for details on every release.
+### Git, GitHub Sync & Reliability
+
+- **Integration-branch self-merge guard (#5024)** — milestone refuses to self-merge when the integration branch equals the milestone branch; self-merge ref guard normalized.
+- **Slice-cadence safety** — integration branch used for slice cadence, dirty worktree state preserved on merge, checked-out slice worktrees advance safely, slice PRs deferred until completion, slice-PR sync stays retryable on failure.
+- **Milestone-ID reservation** — DB rows included in reservation; ghost IDs reused in `nextMilestoneId` to close gaps; `ensurePreconditions` guarded against phantom IDs (#4996); orphan milestone-dir doctor check (#4996); milestone-dir creation deferred until first artifact write.
+- **Auto-commit hygiene** — task commits scoped to reported files, generated commit subjects sanitized, user hooks run on automated commits, milestone-tagged commits bound when `.gsd/` is gitignored (#5033), startup blocked on `git index.lock`.
+- **GitHub sync** — issues no longer closed before delivery, failed task closure / slice PR sync stay retryable, config cache scoped by project, safe git environment used.
+
+### Safety, Recovery & Hardening
+
+- **Policy-block pause through dispatch errors** — pause state is preserved when dispatch errors out mid-policy-block.
+- **Skip-validation persistence** — skip-validation state persists and gate rows are cleared on recover.
+- **Cancelled-gate hard block** — redirected to `ask_user_questions`; false plain-text claim dropped from the message.
+- **Write-gate basePath required** — `process.cwd()` defaults removed; basePath threaded through pre-existing tests.
+- **Atomic metrics writes** — parallel-mode `metrics.json` writes merge atomically; ledger cache invalidated after prune; `saveLedger` aborts when lock not acquired; stale-lock detection adds PID stamp + async yield.
+- **Auto-worktree teardown** — `activeWorkspace` guaranteed cleared on teardown failure; teardown try/finally broadened to cover `chdir`; cleanup steps mirrored on the abort path; warning emitted on resume when persisted worktree is missing.
+- **Empty-turn nudge** — no longer auto-replies to user questions; deferred on mid-line approval prompts.
+- **Refuses project writes from `$HOME`** — and surfaces real SQL errors from `capture_thought` instead of swallowing them.
+
+### VS Code & TUI
+
+- **Checkpoint tree view** — registered in the VS Code extension; checkpoint file existence restored; RPC file-mutation events tracked; agent diff scoped to tracked files.
+- **TUI image paste** — pasted images preserved on regular submit.
+- **Bundled `/gsd` slash command protected** — core handler refuses to overwrite the bundled command.
+
+See the full [Changelog](./CHANGELOG.md) for the complete v2.79 entry and prior releases.
+
+<details>
+<summary>v2.78 highlights</summary>
+
+- **Slice-cadence worktree collapse (#4765)** — `git.collapse_cadence: "milestone" | "slice"` shrinks the orphan window per-slice; pair with `git.milestone_resquash: true` to collapse to one milestone commit
+- **Worktree telemetry (#4764)** — journal events + `summarizeWorktreeTelemetry`; `/gsd forensics` worktree section with `worktree-orphan` and `worktree-unmerged-exit` anomalies
+- **Worktree-aware canonical milestone root (#4761)** — `resolveCanonicalMilestoneRoot` routes validators through the live worktree
+- **Bootstrap orphan audit (#4762)** — in-progress milestones with commits ahead of main are no longer skipped
+- **Unified component system** — skills, agents, pipelines, and marketplace as one component model wired through runtime, dispatch, and telemetry
+- **UnitContextManifest v2 (#4924, #4934)** — typed manifest with declarative tools-policy and typed computed artifacts; CI-guarded
+- **Composer migration phase 3 (#4782)** — `complete-slice`, `research-milestone`, `run-uat`, `reassess-roadmap` build context through the manifest composer
+- **Milestone scope classifier + pipeline variants (#4781)** — auto picks a pipeline variant from milestone shape
+- **Per-unit-type skill manifest resolver (#4779)** — skills wire into specific unit types instead of being globally on
+- **Single-writer-v3 control plane** — durable-state writer gaps closed
+- **Extensions framework** — `gsd extensions install / update / uninstall / list / info / validate`; topological load order; cmux↔gsd decoupling via `cmux-events`; extracted `@gsd-extensions/google-search`
+- **GPT-5.5 Codex support** + `xhigh` thinking level; auth mode in `/model`; permission granularity picker; headless auto default → `bypassPermissions` (#4657)
+- **Major git-safety pass** — TOCTOU ancestry guard, atomic sync-lock with PID-verified stale override, `.git/index.lock` 5-min gate, env overlay strip, rebase/cherry-pick/revert detection, working-tree stash before `reset --hard`, unborn-branch worktree guard, user hooks + `commit.gpgsign` on auto-commits
+- **Atomic `.gsd/` state writes**; **compaction correctness fix (#4665)**; **write-gate hardening (#4950)**; **auto state-machine** non-retriable policy errors (#4973), baseline restoration (#4961, #4966); slice + crash recovery; empty-turn recovery shape canonicalized
+
+</details>
 
 <details>
 <summary>v2.77 highlights</summary>

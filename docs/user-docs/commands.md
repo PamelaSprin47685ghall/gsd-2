@@ -323,6 +323,16 @@ echo "Build a CLI tool" | gsd headless new-milestone --context -
 
 Any `/gsd` subcommand works as a positional argument — `gsd headless status`, `gsd headless doctor`, `gsd headless dispatch execute`, etc.
 
+### `gsd headless recover` (v2.79)
+
+Non-TTY equivalent of `/gsd recover` — resets the DB hierarchy plus persisted validation and quality-gate state, then reconstructs from rendered markdown. Designed for CI, cron, and any environment where the interactive recover prompt cannot run.
+
+```bash
+gsd headless recover
+```
+
+Exits non-zero if recovery fails. Pair with `gsd headless query` afterwards to verify the rebuilt state.
+
 ### `gsd headless query`
 
 Returns a single JSON object with the full project snapshot — no LLM session, no RPC child, instant response (~50ms). This is the recommended way for orchestrators and scripts to inspect GSD state.

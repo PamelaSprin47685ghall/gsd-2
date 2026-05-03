@@ -324,6 +324,8 @@ Use this only when the database is missing, damaged, or known to be stale but th
 
 `/gsd recover` clears the database hierarchy tables plus persisted validation/gate state from prior runs, including quality-gate rows and skipped-validation assessments, then reconstructs the hierarchy from markdown and derives state again to verify the result. Normal runtime does not silently import markdown projections, and worktree markdown is not synced back as authoritative state.
 
+For non-TTY environments (CI, cron, scripted automation), v2.79 adds `gsd headless recover` — same semantics, no interactive prompt. Exits non-zero on failure.
+
 ## Getting Help
 
 - **GitHub Issues:** [github.com/gsd-build/GSD-2/issues](https://github.com/gsd-build/GSD-2/issues)
