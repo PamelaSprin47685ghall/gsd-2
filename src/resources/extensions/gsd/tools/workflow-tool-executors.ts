@@ -190,9 +190,20 @@ export async function executeSummarySave(
     );
 
     let registeredMilestones: string[] = [];
+    let registrationWarning: string | undefined;
     if (params.artifact_type === "PROJECT") {
-      registeredMilestones = registerProjectMilestoneSequence(contentToSave);
-      if (registeredMilestones.length > 0) invalidateStateCache();
+      try {
+        registeredMilestones = registerProjectMilestoneSequence(contentToSave);
+        if (registeredMilestones.length > 0) invalidateStateCache();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        registrationWarning = `PROJECT artifact saved, but milestone registration failed: ${msg}`;
+        logWarning("tool", registrationWarning, {
+          tool: "gsd_summary_save",
+          error: String(err),
+          stack: err instanceof Error ? err.stack ?? "" : "",
+        });
+      }
     }
 
     if (params.artifact_type === "CONTEXT" && !params.task_id) {
@@ -214,6 +225,7 @@ export async function executeSummarySave(
         artifact_type: params.artifact_type,
         content_source: contentSource,
         ...(registeredMilestones.length > 0 ? { registeredMilestones } : {}),
+        ...(registrationWarning ? { warning: registrationWarning } : {}),
       },
     };
   } catch (err) {
