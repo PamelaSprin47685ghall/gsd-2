@@ -33,6 +33,16 @@ import { ModelPolicyDispatchBlockedError } from "../auto-model-selection.js";
 import { resolveEngine } from "../engine-resolver.js";
 import { logWarning } from "../workflow-logger.js";
 import { gsdRoot } from "../paths.js";
+import { heartbeatAutoWorker } from "../db/auto-workers.js";
+import {
+  recordDispatchClaim,
+  markRunning as markDispatchRunning,
+  markCompleted as markDispatchCompleted,
+  markFailed as markDispatchFailed,
+  markStuck as markDispatchStuck,
+  getRecentForUnit as getRecentDispatchesForUnit,
+} from "../db/unit-dispatches.js";
+import { refreshMilestoneLease } from "../db/milestone-leases.js";
 import { atomicWriteSync } from "../atomic-write.js";
 import { resolveUokFlags } from "../uok/flags.js";
 import { scheduleSidecarQueue } from "../uok/execution-graph.js";
@@ -137,6 +147,63 @@ function saveCustomVerifyRetryCounts(s: AutoSession): void {
     if (code !== "ENOENT") {
       debugLog("autoLoop", { phase: "save-custom-verify-retries-failed", error: err instanceof Error ? err.message : String(err) });
     }
+  }
+}
+
+/**
+ * Phase B helper: open a unit_dispatches row in 'claimed' state and
+ * immediately transition it to 'running'. Returns the dispatch_id on
+ * success, or null when the ledger cannot be written (DB unavailable, no
+ * worker registered, no active milestone lease, double-claim race) — null
+ * means "fall through to existing single-worker semantics, no ledger
+ * entry for this iteration".
+ *
+ * Single-worker compatibility: this function is best-effort and never
+ * throws. The auto-loop must continue to behave identically when the
+ * ledger is degraded.
+ */
+function openDispatchClaim(
+  s: AutoSession,
+  flowId: string,
+  turnId: string,
+  iterData: IterationData,
+): number | null {
+  if (!s.workerId || s.milestoneLeaseToken === null) return null;
+  const mid = iterData.mid;
+  if (!mid) return null;
+
+  try {
+    const recent = getRecentDispatchesForUnit(iterData.unitId, 1);
+    const attemptN = (recent[0]?.attempt_n ?? 0) + 1;
+    const claim = recordDispatchClaim({
+      traceId: flowId,
+      turnId,
+      workerId: s.workerId,
+      milestoneLeaseToken: s.milestoneLeaseToken,
+      milestoneId: mid,
+      sliceId: iterData.state.activeSlice?.id ?? null,
+      taskId: iterData.state.activeTask?.id ?? null,
+      unitType: iterData.unitType,
+      unitId: iterData.unitId,
+      attemptN,
+    });
+    if (!claim.ok) {
+      debugLog("autoLoop", {
+        phase: "dispatch-claim-rejected",
+        unitId: iterData.unitId,
+        existingId: claim.existingId,
+        existingWorker: claim.existingWorker,
+      });
+      return null;
+    }
+    markDispatchRunning(claim.dispatchId);
+    return claim.dispatchId;
+  } catch (err) {
+    debugLog("autoLoop", {
+      phase: "dispatch-claim-failed",
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
   }
 }
 
@@ -281,6 +348,23 @@ export async function autoLoop(
   while (s.active) {
     iteration++;
     debugLog("autoLoop", { phase: "loop-top", iteration });
+
+    // Phase B: heartbeat the worker registry + active milestone lease so
+    // janitors and concurrent workers see a live process. Best-effort —
+    // DB unavailability or stale state must not stop the loop.
+    if (s.workerId) {
+      try {
+        heartbeatAutoWorker(s.workerId);
+        if (s.currentMilestoneId && s.milestoneLeaseToken) {
+          refreshMilestoneLease(s.workerId, s.currentMilestoneId, s.milestoneLeaseToken);
+        }
+      } catch (err) {
+        debugLog("autoLoop", {
+          phase: "heartbeat-failed",
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     // ── Journal: per-iteration flow grouping ──
     const flowId = randomUUID();
@@ -671,6 +755,15 @@ export async function autoLoop(
       }
 
       await enforceMinRequestInterval(s, prefs);
+
+      // Phase B: claim a unit_dispatches row before invoking the unit. The
+      // partial unique index idx_unit_dispatches_active_per_unit prevents
+      // a second worker from claiming the same unit concurrently. Returns
+      // null when DB unavailable, no worker registered, or no active lease
+      // — those degraded paths fall through to the existing single-worker
+      // semantics with no ledger entry, preserving back-compat.
+      const dispatchId = openDispatchClaim(s, flowId, turnId, iterData);
+
       const unitPhaseResult = await runUnitPhaseViaContract(
         dispatchContract,
         ic,
@@ -687,6 +780,9 @@ export async function autoLoop(
         unitId: iterData.unitId,
       });
       if (unitPhaseResult.action === "break") {
+        if (dispatchId !== null) {
+          try { markDispatchFailed(dispatchId, { errorSummary: "unit-break" }); } catch (err) { debugLog("autoLoop", { phase: "dispatch-ledger-write-failed", error: err instanceof Error ? err.message : String(err) }); }
+        }
         finishTurn("stopped", "execution", "unit-break");
         break;
       }
@@ -702,14 +798,23 @@ export async function autoLoop(
         const finalizeFailureClass = finalizeResult.reason === "git-closeout-failure"
           ? "git"
           : "closeout";
+        if (dispatchId !== null) {
+          try { markDispatchFailed(dispatchId, { errorSummary: `finalize-break:${finalizeResult.reason ?? "unknown"}` }); } catch (err) { debugLog("autoLoop", { phase: "dispatch-ledger-write-failed", error: err instanceof Error ? err.message : String(err) }); }
+        }
         finishTurn("stopped", finalizeFailureClass, "finalize-break");
         break;
       }
       if (finalizeResult.action === "continue") {
+        if (dispatchId !== null) {
+          try { markDispatchFailed(dispatchId, { errorSummary: "finalize-retry" }); } catch (err) { debugLog("autoLoop", { phase: "dispatch-ledger-write-failed", error: err instanceof Error ? err.message : String(err) }); }
+        }
         finishTurn("retry");
         continue;
       }
 
+      if (dispatchId !== null) {
+        try { markDispatchCompleted(dispatchId); } catch (err) { debugLog("autoLoop", { phase: "dispatch-ledger-write-failed", error: err instanceof Error ? err.message : String(err) }); }
+      }
       consecutiveErrors = 0; // Iteration completed successfully
       consecutiveCooldowns = 0;
       recentErrorMessages.length = 0;

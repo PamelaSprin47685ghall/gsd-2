@@ -25,6 +25,7 @@ import { emitWorktreeCreated, emitWorktreeMerged } from "./worktree-telemetry.js
 import { getCollapseCadence, getMilestoneResquash, resquashMilestoneOnMain } from "./slice-cadence.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { resolveWorktreeProjectRoot, normalizeWorktreePathForCompare } from "./worktree-root.js";
+import { claimMilestoneLease, releaseMilestoneLease } from "./db/milestone-leases.js";
 
 // ─── Path Comparison Helper ────────────────────────────────────────────────
 /**
@@ -197,6 +198,68 @@ export class WorktreeResolver {
         reason: "isolation-degraded",
       });
       return;
+    }
+
+    // Phase B: claim a milestone lease before any worktree mutation. Two
+    // workers cannot enter the same milestone concurrently. Best-effort:
+    // skip if no worker registered (single-worker fallback) or DB
+    // unavailable; reuse existing lease if we already hold it on this
+    // milestone (re-entry within the same session).
+    if (this.s.workerId) {
+      if (this.s.currentMilestoneId === milestoneId && this.s.milestoneLeaseToken !== null) {
+        // Already held — no-op, the heartbeat in loop.ts refreshes TTL.
+      } else {
+        // If we held a different milestone, release it first so other
+        // workers don't have to wait for TTL.
+        if (this.s.currentMilestoneId && this.s.currentMilestoneId !== milestoneId && this.s.milestoneLeaseToken !== null) {
+          try {
+            releaseMilestoneLease(this.s.workerId, this.s.currentMilestoneId, this.s.milestoneLeaseToken);
+          } catch (err) {
+            debugLog("WorktreeResolver", {
+              action: "enterMilestone",
+              milestoneId,
+              releasePriorLeaseError: err instanceof Error ? err.message : String(err),
+            });
+          }
+          this.s.milestoneLeaseToken = null;
+        }
+
+        try {
+          const claim = claimMilestoneLease(this.s.workerId, milestoneId);
+          if (claim.ok) {
+            this.s.milestoneLeaseToken = claim.token;
+            debugLog("WorktreeResolver", {
+              action: "enterMilestone",
+              milestoneId,
+              leaseAcquired: true,
+              fencingToken: claim.token,
+              expiresAt: claim.expiresAt,
+            });
+          } else {
+            // Lease held by another worker — fail loud so the user can
+            // see the conflict instead of silently double-running.
+            const msg = `Milestone ${milestoneId} is held by worker ${claim.byWorker} until ${claim.expiresAt}.`;
+            debugLog("WorktreeResolver", {
+              action: "enterMilestone",
+              milestoneId,
+              leaseHeldByOther: claim.byWorker,
+              expiresAt: claim.expiresAt,
+            });
+            ctx.notify(`${msg} Another auto-mode worker is active. Stop it before entering ${milestoneId}.`, "error");
+            this.s.isolationDegraded = true;
+            return;
+          }
+        } catch (err) {
+          // DB unavailable or other error — log and fall through to the
+          // pre-Phase-B single-worker behavior so a fresh project before
+          // DB init still works.
+          debugLog("WorktreeResolver", {
+            action: "enterMilestone",
+            milestoneId,
+            leaseError: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
     }
 
     // Resolve the project root for worktree operations via shared helper.

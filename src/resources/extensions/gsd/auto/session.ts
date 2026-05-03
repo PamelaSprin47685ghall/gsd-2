@@ -97,6 +97,21 @@ export class AutoSession {
   originalBasePath = "";
   // TODO(C8): remove basePath/originalBasePath once all readers use s.scope
   scope: MilestoneScope | null = null;
+
+  // ── Coordination identity (Phase B — DB-backed coordination) ────────────
+  /**
+   * Worker registry ID set by registerAutoWorker() at session start. Used by
+   * heartbeatAutoWorker() each loop iteration and by recordDispatchClaim()
+   * to fence dispatch ledger writes against stale workers.
+   */
+  workerId: string | null = null;
+  /**
+   * Active milestone lease fencing token, set by claimMilestoneLease() inside
+   * worktree-resolver.enterMilestone(). Threaded into recordDispatchClaim()
+   * as milestone_lease_token so out-of-band dispatches by a stale worker
+   * are detectable.
+   */
+  milestoneLeaseToken: number | null = null;
   previousProjectRootEnv: string | null = null;
   hadProjectRootEnv = false;
   projectRootEnvCaptured = false;
@@ -251,6 +266,8 @@ export class AutoSession {
     this.basePath = "";
     this.originalBasePath = "";
     this.scope = null;
+    this.workerId = null;
+    this.milestoneLeaseToken = null;
     this.previousProjectRootEnv = null;
     this.hadProjectRootEnv = false;
     this.projectRootEnvCaptured = false;

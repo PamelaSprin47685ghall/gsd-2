@@ -244,6 +244,7 @@ import type {
   CurrentUnit,
   UnitRouting,
   StartModel,
+  AutoSession,
 } from "./auto/session.js";
 export {
   STUB_RECOVERY_THRESHOLD,
@@ -257,6 +258,9 @@ export type {
 import { autoSession as s } from "./auto-runtime-state.js";
 import { gsdHome } from "./gsd-home.js";
 import { createWorkspace, scopeMilestone } from "./workspace.js";
+import { registerAutoWorker, markWorkerStopping } from "./db/auto-workers.js";
+import { releaseMilestoneLease } from "./db/milestone-leases.js";
+import { normalizeRealPath } from "./paths.js";
 
 // ── ENCAPSULATION INVARIANT ─────────────────────────────────────────────────
 // ALL mutable auto-mode state lives in the AutoSession class (auto/session.ts).
@@ -273,6 +277,28 @@ import { createWorkspace, scopeMilestone } from "./workspace.js";
 
 /** Throttle STATE.md rebuilds — at most once per 30 seconds */
 const STATE_REBUILD_MIN_INTERVAL_MS = 30_000;
+
+/**
+ * Phase B — register this auto-mode process in the workers table so other
+ * workers and janitors can detect liveness via heartbeat. Best-effort: if
+ * the DB is unavailable (e.g. fresh project before init) we skip registration
+ * silently rather than blocking session start.
+ */
+function registerAutoWorkerForSession(session: AutoSession): void {
+  if (session.workerId) return; // already registered (e.g. resume re-runs)
+  try {
+    const projectRootRealpath = normalizeRealPath(
+      session.scope?.workspace.projectRoot
+        ?? (session.originalBasePath || session.basePath),
+    );
+    session.workerId = registerAutoWorker({ projectRootRealpath });
+  } catch (err) {
+    debugLog("autoLoop", {
+      phase: "register-worker-failed",
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
 
 function captureProjectRootEnv(projectRoot: string): void {
   if (!s.projectRootEnvCaptured) {
@@ -909,6 +935,21 @@ export async function stopAuto(
       if (lockBase()) releaseSessionLock(lockBase());
     } catch (e) {
       debugLog("stop-cleanup-locks", { error: e instanceof Error ? e.message : String(e) });
+    }
+
+    // ── Step 1b: Coordination cleanup (Phase B) ──
+    // Release any active milestone lease so other workers don't have to
+    // wait for TTL expiry, then mark this worker as stopping. Best-effort:
+    // DB unavailability or stale state must not block shutdown.
+    try {
+      if (s.workerId && s.currentMilestoneId && s.milestoneLeaseToken) {
+        releaseMilestoneLease(s.workerId, s.currentMilestoneId, s.milestoneLeaseToken);
+      }
+      if (s.workerId) {
+        markWorkerStopping(s.workerId);
+      }
+    } catch (e) {
+      debugLog("stop-cleanup-coordination", { error: e instanceof Error ? e.message : String(e) });
     }
 
     // ── Step 1b: Flush queued follow-up messages (#3512) ──
@@ -1824,6 +1865,7 @@ export async function startAuto(
     pi.events.emit(CMUX_CHANNELS.LOG, { preferences: loadEffectiveGSDPreferences(s.basePath || undefined)?.preferences, message: s.stepMode ? "Step-mode resumed." : "Auto-mode resumed.", level: "progress" });
 
     captureProjectRootEnv(s.originalBasePath || s.basePath);
+    registerAutoWorkerForSession(s);
     startAutoCommandPolling(s.basePath);
     await runAutoLoopWithUok({
       ctx,
@@ -1862,6 +1904,7 @@ export async function startAuto(
   rebuildScope(s.basePath, s.currentMilestoneId);
 
   captureProjectRootEnv(s.originalBasePath || s.basePath);
+  registerAutoWorkerForSession(s);
   try {
     pi.events.emit(CMUX_CHANNELS.SIDEBAR, { action: "sync" as const, preferences: loadEffectiveGSDPreferences(s.basePath || undefined)?.preferences, state: await deriveState(s.basePath) });
   } catch (err) {
