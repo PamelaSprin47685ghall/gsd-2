@@ -261,9 +261,6 @@ export class AutoSession {
    * Always realpath-normalized so cache keys (e.g. deriveState's _stateCache)
    * cannot drift across worktree↔project-root path-string variants for the
    * same filesystem location.
-   *
-   * NOTE: An identical getter exists in PR #5246 (Phase A pt 2). When the
-   * two PRs merge, git will see byte-equivalent adds and auto-resolve.
    */
   get canonicalProjectRoot(): string {
     const root =

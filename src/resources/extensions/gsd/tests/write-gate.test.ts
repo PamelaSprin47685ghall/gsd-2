@@ -299,31 +299,39 @@ test('write-gate: deep root PROJECT/REQUIREMENTS final saves require verified ap
 });
 
 test('write-gate: reopening a gate revokes its previous verified approval', () => {
-  clearDiscussionFlowState(process.cwd());
+  const base = join(tmpdir(), `gsd-write-gate-reopen-${randomUUID()}`);
+  mkdirSync(base, { recursive: true });
 
-  markApprovalGateVerified('depth_verification_project_confirm');
-  assert.strictEqual(
-    shouldBlockRootArtifactSaveInSnapshot(
-      loadWriteGateSnapshot(process.cwd()),
-      'PROJECT',
-      { requireVerifiedApproval: true },
-    ).block,
-    false,
-    'precondition: verified approval unlocks the final project artifact',
-  );
+  try {
+    clearDiscussionFlowState(base);
 
-  setPendingGate('depth_verification_project_confirm', process.cwd());
-  clearPendingGate(process.cwd());
+    markApprovalGateVerified('depth_verification_project_confirm', base);
+    assert.strictEqual(
+      shouldBlockRootArtifactSaveInSnapshot(
+        loadWriteGateSnapshot(base),
+        'PROJECT',
+        { requireVerifiedApproval: true },
+      ).block,
+      false,
+      'precondition: verified approval unlocks the final project artifact',
+    );
 
-  assert.strictEqual(
-    shouldBlockRootArtifactSaveInSnapshot(
-      loadWriteGateSnapshot(process.cwd()),
-      'PROJECT',
-      { requireVerifiedApproval: true },
-    ).block,
-    true,
-    'a re-asked gate must require a fresh approval',
-  );
+    setPendingGate('depth_verification_project_confirm', base);
+    clearPendingGate(base);
+
+    assert.strictEqual(
+      shouldBlockRootArtifactSaveInSnapshot(
+        loadWriteGateSnapshot(base),
+        'PROJECT',
+        { requireVerifiedApproval: true },
+      ).block,
+      true,
+      'a re-asked gate must require a fresh approval',
+    );
+  } finally {
+    clearDiscussionFlowState(base);
+    rmSync(base, { recursive: true, force: true });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════

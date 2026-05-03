@@ -1,6 +1,6 @@
 # Parallel Milestone Orchestration
 
-Run multiple milestones simultaneously in isolated git worktrees. Each milestone gets its own worker process, its own branch, and its own context window, while a coordinator tracks progress, enforces budgets, and keeps everything in sync through the shared project-root SQLite runtime.
+Run multiple milestones simultaneously in isolated git worktrees. Each milestone gets its own worker process, its own branch, and its own context window, while the shared project-root SQLite runtime tracks worker liveness, milestone ownership, dispatch status, retry windows, and control commands.
 
 > **Status:** Behind `parallel.enabled: false` by default. Opt-in only — zero impact to existing users.
 >
@@ -82,12 +82,14 @@ Each worker is a separate `gsd` process with complete isolation:
 
 ### Coordination
 
-Workers and the coordinator coordinate through the project-root SQLite database in WAL mode:
+Workers and the coordinator communicate through DB-backed coordination tables in `.gsd/gsd.db`:
 
-- **Worker registry** (`workers`) — heartbeats and liveness are written centrally
-- **Milestone leases** (`milestone_leases`) — only one worker may own a milestone at a time
-- **Dispatch ledger** (`unit_dispatches`) — duplicate unit claims are rejected atomically
-- **Cancellation + command queue** (`cancellation_requests`, `command_queue`) — pause/stop/resume handoff is persisted in shared runtime state
+- **`workers`** — registry of active auto-mode workers with heartbeat TTL and shutdown/crash status
+- **`milestone_leases`** — one-worker-at-a-time milestone ownership with fencing tokens for safe takeover after expiry or release
+- **`unit_dispatches`** — dispatch ledger that records claim, running, completed, failed, stuck, canceled, and retry timing state per unit
+- **`command_queue`** — targeted or broadcast control commands claimed atomically by workers
+
+If a worker stops heartbeating, its lease can expire and another worker can safely take over the milestone. Retry-aware stuck detection also consults the dispatch ledger so a unit waiting for `next_run_at` is not misclassified as stuck.
 
 This model assumes local-disk locking semantics. Do not place the project on NFS/SMB/FUSE-style mounts or try to share `.gsd/gsd.db*` across hosts.
 
@@ -192,7 +194,7 @@ Coordinator                    Worker
     │                            └── process exits
 ```
 
-Workers poll the shared command queue between units. The coordinator also sends `SIGTERM` for immediate response on stop.
+Workers poll the command queue between units and the coordinator also sends `SIGTERM` for immediate response on stop. Heartbeats and lease refreshes happen continuously during the loop, so `parallel status` reflects DB state rather than sidecar JSON files.
 
 ## Merge Reconciliation
 
@@ -236,17 +238,18 @@ When `budget_ceiling` is set, the coordinator tracks aggregate cost across all w
 
 `/gsd doctor` detects parallel session issues:
 
-- **Stale parallel sessions** — Worker process died without cleanup. Doctor inspects the shared runtime DB for expired heartbeats, crashed workers, and stale coordination rows, then reconciles them.
+- **Stale workers or leases** — Worker process died without cleanup. Doctor inspects worker heartbeats and expired milestone leases in the database, then clears the stale coordination state.
 
 Run `/gsd doctor --fix` to clean up automatically.
 
 ### Stale Detection
 
 Sessions are considered stale when:
-- The worker PID is no longer running (checked via `process.kill(pid, 0)`)
-- The last heartbeat is older than 60 seconds
+- The worker PID is no longer running
+- The last heartbeat is older than the worker TTL
+- A milestone lease is released or expires without a matching active heartbeat
 
-The coordinator runs stale detection during `refreshWorkerStatuses()` and automatically removes dead sessions.
+The coordinator runs stale detection during status refresh and either marks the worker crashed or allows the lease to be taken over on the next claim.
 
 ## Safety Model
 
@@ -258,7 +261,7 @@ The coordinator runs stale detection during `refreshWorkerStatuses()` and automa
 | **`GSD_MILESTONE_LOCK`** | Each worker only sees its milestone in state derivation |
 | **`GSD_PARALLEL_WORKER`** | Workers cannot spawn nested parallel sessions |
 | **Budget ceiling** | Aggregate cost enforcement across all workers |
-| **Command-based shutdown** | Graceful stop via persisted DB commands + SIGTERM |
+| **Command queue + SIGTERM** | Graceful stop/pause/resume via DB-backed commands plus process signals |
 | **Doctor integration** | Detects and cleans up orphaned sessions |
 | **Conflict-aware merge** | Stops on code conflicts while runtime coordination state stays anchored in the shared DB |
 
@@ -266,9 +269,11 @@ The coordinator runs stale detection during `refreshWorkerStatuses()` and automa
 
 ```text
 .gsd/
-├── gsd.db                       # Shared runtime DB (workers, leases, dispatches, commands, runtime_kv)
-├── gsd.db-wal                   # WAL sidecar for the shared runtime DB
-├── gsd.db-shm                   # Shared-memory sidecar for the WAL runtime
+├── gsd.db                       # Shared runtime database
+├── gsd.db-wal / gsd.db-shm      # SQLite WAL sidecars while workers are active
+├── parallel/                    # Per-milestone runtime lock / isolation dirs
+│   ├── M002/
+│   └── M003/
 ├── worktrees/                   # Git worktrees (one per milestone)
 │   ├── M002/                    # M002's isolated checkout
 │   │   └── src/                 # M002's working copy
@@ -277,9 +282,7 @@ The coordinator runs stale detection during `refreshWorkerStatuses()` and automa
 └── ...
 ```
 
-Track `.gsd/gsd.db` in git as the stageable source of truth. `checkpointDatabase()` in [src/resources/extensions/gsd/gsd-db.ts](/Users/jeremymcspadden/.oh-my-pr/worktrees/gsd-build__gsd-2/pr-5249-37dc5b59-7d9f-4b66-ba9b-6e31abb686d9/src/resources/extensions/gsd/gsd-db.ts:1752) flushes WAL state back into that main DB file before staging.
-
-Only `.gsd/gsd.db-wal`, `.gsd/gsd.db-shm`, and `.gsd/worktrees/` are runtime artifacts that should be gitignored.
+`.gsd/gsd.db*`, `.gsd/parallel/`, and `.gsd/worktrees/` are all local runtime artifacts and should remain gitignored.
 
 ## Troubleshooting
 

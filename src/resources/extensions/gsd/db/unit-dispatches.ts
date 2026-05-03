@@ -85,11 +85,15 @@ function isAlreadyActiveConstraintError(err: unknown): boolean {
     err && typeof err === "object" && "code" in err
       ? String((err as { code?: unknown }).code ?? "")
       : "";
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/\bFOREIGN KEY\b/i.test(msg)) {
+    return false;
+  }
+
   if (code === "SQLITE_CONSTRAINT" || code === "SQLITE_CONSTRAINT_UNIQUE") {
     return true;
   }
 
-  const msg = err instanceof Error ? err.message : String(err);
   return /\bUNIQUE\b|\bconstraint failed\b/i.test(msg);
 }
 

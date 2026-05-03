@@ -532,7 +532,17 @@ export async function autoLoop(
           activeRunDir: s.activeRunDir,
         });
 
-        const engineState = await engine.deriveState(s.basePath);
+        const engineState = await engine.deriveState(s.canonicalProjectRoot);
+        debugLog("autoLoop", {
+          phase: "post-derive",
+          site: "custom-engine-derive",
+          basePath: s.basePath,
+          originalBasePath: s.originalBasePath,
+          scopeProjectRoot: s.scope?.workspace.projectRoot,
+          canonicalProjectRoot: s.canonicalProjectRoot,
+          derivedPhase: (engineState as { phase?: string }).phase,
+          isComplete: engineState.isComplete,
+        });
         if (engineState.isComplete) {
           await deps.stopAuto(ctx, pi, "Workflow complete");
           break;
@@ -551,7 +561,15 @@ export async function autoLoop(
 
         // dispatch.action === "dispatch"
         const step = dispatch.step!;
-        const gsdState = await deps.deriveState(s.basePath);
+        const gsdState = await deps.deriveState(s.canonicalProjectRoot);
+        debugLog("autoLoop", {
+          phase: "post-derive",
+          site: "custom-engine-gsd-state",
+          basePath: s.basePath,
+          canonicalProjectRoot: s.canonicalProjectRoot,
+          derivedPhase: gsdState.phase,
+          activeUnit: gsdState.activeTask?.id ?? gsdState.activeSlice?.id ?? gsdState.activeMilestone?.id,
+        });
 
         iterData = {
           unitType: step.unitType,
@@ -752,7 +770,15 @@ export async function autoLoop(
         observedUnitId = iterData.unitId;
       } else {
         // ── Sidecar path: use values from the sidecar item directly ──
-        const sidecarState = await deps.deriveState(s.basePath);
+        const sidecarState = await deps.deriveState(s.canonicalProjectRoot);
+        debugLog("autoLoop", {
+          phase: "post-derive",
+          site: "sidecar",
+          basePath: s.basePath,
+          canonicalProjectRoot: s.canonicalProjectRoot,
+          derivedPhase: sidecarState.phase,
+          activeUnit: sidecarState.activeTask?.id ?? sidecarState.activeSlice?.id ?? sidecarState.activeMilestone?.id,
+        });
         iterData = {
           unitType: sidecarItem.unitType,
           unitId: sidecarItem.unitId,

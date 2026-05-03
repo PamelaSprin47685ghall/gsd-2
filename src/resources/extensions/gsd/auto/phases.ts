@@ -418,8 +418,10 @@ export async function runPreDispatch(
     );
   }
 
-  // Derive state
-  let state = await deps.deriveState(s.basePath);
+  // Derive state — use canonical project root so the cache key is stable
+  // across worktree↔project-root path-form alternation. See PR #5236
+  // (workspace handle infrastructure) and the Phase A pt 2 plan.
+  let state = await deps.deriveState(s.canonicalProjectRoot);
   const { getDeepStageGate } = await import("../auto-dispatch.js");
   const deepStageGate = getDeepStageGate(prefs, s.basePath);
   const canRunDeepSetupGate =
@@ -457,7 +459,7 @@ export async function runPreDispatch(
     let compiled = ensurePlanV2Graph(s.basePath, state);
     if (isEmptyPlanV2GraphResult(compiled)) {
       deps.invalidateAllCaches();
-      state = await deps.deriveState(s.basePath);
+      state = await deps.deriveState(s.canonicalProjectRoot);
       compiled = shouldRunPlanV2Gate(state.phase)
         ? ensurePlanV2Graph(s.basePath, state)
         : {
@@ -657,7 +659,7 @@ export async function runPreDispatch(
 
     deps.invalidateAllCaches();
 
-    state = await deps.deriveState(s.basePath);
+    state = await deps.deriveState(s.canonicalProjectRoot);
     mid = state.activeMilestone?.id;
     midTitle = state.activeMilestone?.title;
 
@@ -837,7 +839,7 @@ export async function runPreDispatch(
   }
   if (mergeReconcileResult === "reconciled") {
     deps.invalidateAllCaches();
-    state = await deps.deriveState(s.basePath);
+    state = await deps.deriveState(s.canonicalProjectRoot);
     mid = state.activeMilestone?.id;
     midTitle = state.activeMilestone?.title;
   }

@@ -54,4 +54,4 @@ If an existing project has markdown artifacts but a missing or damaged database,
 /gsd recover
 ```
 
-`/gsd recover` reconstructs the milestone, slice, and task hierarchy from the rendered markdown on disk. It is an explicit recovery/import operation; normal runtime does not silently derive state from markdown.
+`/gsd recover` clears the persisted hierarchy plus validation-related state, including quality-gate rows and skipped-validation assessments, then reconstructs the milestone, slice, and task hierarchy from the rendered markdown on disk. It is an explicit destructive recovery/import operation; normal runtime does not silently derive state from markdown.

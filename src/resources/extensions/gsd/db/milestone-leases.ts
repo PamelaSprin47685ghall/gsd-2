@@ -43,11 +43,15 @@ function isDuplicateLeaseInsertError(err: unknown): boolean {
     err && typeof err === "object" && "code" in err
       ? String((err as { code?: unknown }).code ?? "")
       : "";
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/\bFOREIGN KEY\b/i.test(msg)) {
+    return false;
+  }
+
   if (code === "SQLITE_CONSTRAINT" || code === "SQLITE_CONSTRAINT_PRIMARYKEY" || code === "SQLITE_CONSTRAINT_UNIQUE") {
     return true;
   }
 
-  const msg = err instanceof Error ? err.message : String(err);
   return /\bUNIQUE\b|\bPRIMARY KEY\b|\bconstraint failed\b/i.test(msg);
 }
 
@@ -220,8 +224,8 @@ export function releaseMilestoneLease(
 ): boolean {
   if (!isDbAvailable()) return false;
   const db = _getAdapter()!;
-  const result = transaction(() => {
-    return db.prepare(
+  return transaction(() => {
+    const result = db.prepare(
       `UPDATE milestone_leases
        SET status = 'released'
        WHERE milestone_id = :milestone_id
@@ -233,22 +237,22 @@ export function releaseMilestoneLease(
       ":worker_id": workerId,
       ":token": fencingToken,
     });
+    const changes =
+      typeof (result as { changes?: unknown }).changes === "number"
+        ? (result as { changes: number }).changes
+        : 0;
+    if (changes === 1) {
+      insertAuditEvent({
+        eventId: randomUUID(),
+        traceId: workerId,
+        category: "orchestration",
+        type: "lease-released",
+        ts: new Date().toISOString(),
+        payload: { workerId, milestoneId, token: fencingToken },
+      });
+    }
+    return changes === 1;
   });
-  const changes =
-    typeof (result as { changes?: unknown }).changes === "number"
-      ? (result as { changes: number }).changes
-      : 0;
-  if (changes === 1) {
-    insertAuditEvent({
-      eventId: randomUUID(),
-      traceId: workerId,
-      category: "orchestration",
-      type: "lease-released",
-      ts: new Date().toISOString(),
-      payload: { workerId, milestoneId, token: fencingToken },
-    });
-  }
-  return changes === 1;
 }
 
 /**

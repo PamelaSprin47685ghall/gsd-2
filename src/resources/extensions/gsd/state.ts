@@ -271,6 +271,21 @@ export async function getActiveMilestoneId(basePath: string): Promise<string | n
 }
 
 /**
+ * Options for deriveState read-path routing.
+ *
+ * `projectRootForReads`: canonical project root (e.g. from
+ * `s.canonicalProjectRoot`) used for both the cache key and the artifact-read
+ * root in `_deriveStateImpl`. When omitted, behavior is identical to the
+ * single-arg signature (back-compat for all existing callers).
+ *
+ * Typed as an object literal (not `string | DeriveStateOptions`) so accidental
+ * `deriveState(path, "string")` is rejected at compile time.
+ */
+export interface DeriveStateOptions {
+  projectRootForReads?: string;
+}
+
+/**
  * Reconstruct GSD state from the authoritative DB.
  * STATE.md is a rendered cache of this output.
  *
@@ -278,11 +293,22 @@ export async function getActiveMilestoneId(basePath: string): Promise<string | n
  * Legacy filesystem parsing is available only through an explicit opt-in for
  * tests/recovery flows; runtime must not silently infer state from markdown.
  */
-export async function deriveState(basePath: string): Promise<GSDState> {
-  // Return cached result if within the TTL window for the same basePath
+export async function deriveState(
+  basePath: string,
+  opts?: DeriveStateOptions,
+): Promise<GSDState> {
+  // Use the canonical project root (when provided) as the cache key so that
+  // two calls with different basePath strings (e.g. worktree path vs project
+  // root) but the same canonical .gsd/ share a single cache entry. The same
+  // key is used for both the lookup AND the write below — keying lookup on
+  // canonical-root while writing on basePath would silently return stale
+  // results across path-form alternation.
+  const cacheKey = opts?.projectRootForReads ?? basePath;
+
+  // Return cached result if within the TTL window for the same cacheKey
   if (
     _stateCache &&
-    _stateCache.basePath === basePath &&
+    _stateCache.basePath === cacheKey &&
     Date.now() - _stateCache.timestamp < CACHE_TTL_MS
   ) {
     return _stateCache.result;
@@ -303,7 +329,7 @@ export async function deriveState(basePath: string): Promise<GSDState> {
     if (wasDbOpenAttempted()) {
       logWarning("state", "DB unavailable — using explicit legacy filesystem state derivation");
     }
-    result = await _deriveStateImpl(basePath);
+    result = await _deriveStateImpl(basePath, opts);
     _telemetry.markdownDeriveCount++;
   } else {
     if (wasDbOpenAttempted()) {
@@ -325,7 +351,7 @@ export async function deriveState(basePath: string): Promise<GSDState> {
 
   stopTimer({ phase: result.phase, milestone: result.activeMilestone?.id });
   debugCount("deriveStateCalls");
-  _stateCache = { basePath, result, timestamp: Date.now() };
+  _stateCache = { basePath: cacheKey, result, timestamp: Date.now() };
   return result;
 }
 
@@ -838,7 +864,19 @@ export async function deriveStateFromDb(basePath: string): Promise<GSDState> {
 // LEGACY: Filesystem-based state derivation for unmigrated projects.
 // DB-backed projects use deriveStateFromDb() above. Target: extract to
 // state-legacy.ts when all projects are DB-backed.
-export async function _deriveStateImpl(basePath: string): Promise<GSDState> {
+export async function _deriveStateImpl(
+  basePath: string,
+  opts?: DeriveStateOptions,
+): Promise<GSDState> {
+  // When the caller supplies a canonical project root for reads (e.g.
+  // s.canonicalProjectRoot from auto-mode), route all artifact reads through
+  // it. This prevents the worktree-local empty `.gsd/` from being consulted
+  // when the canonical state lives at the project root (or via a `.gsd`
+  // symlink into the external state dir).
+  if (opts?.projectRootForReads) {
+    basePath = opts.projectRootForReads;
+  }
+
   const diskIds = findMilestoneIds(basePath);
   const customOrder = loadQueueOrder(basePath);
   const milestoneIds = sortByQueueOrder(diskIds, customOrder);

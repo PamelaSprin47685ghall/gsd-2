@@ -439,7 +439,7 @@ gsd headless dispatch plan
 
 Headless auto-responds to interactive prompts, detects completion, and exits with structured codes: `0` complete, `1` error/timeout, `2` blocked. Auto-restarts on crash with exponential backoff. Use `gsd headless query` for instant, machine-readable state inspection — returns phase, next dispatch preview, and parallel worker costs as a single JSON object without spawning an LLM session. Pair with [remote questions](./docs/user-docs/remote-questions.md) to route decisions to Slack or Discord when human input is needed.
 
-**Multi-session orchestration** — headless mode can coordinate multiple GSD workers across milestones on the same machine through the project-root SQLite/WAL runtime. This is single-host only: do not share the project database across machines or network filesystems.
+**Multi-session orchestration** — headless mode supports DB-backed coordination across multiple GSD workers on the same machine. Worker registration, milestone leases, unit dispatch tracking, and command delivery live in `.gsd/gsd.db`, while `.gsd/parallel/` remains a local runtime area for per-milestone locks and isolation artifacts.
 
 ### First launch
 
@@ -721,7 +721,7 @@ The best practice for working in teams is to ensure unique milestone names acros
 .gsd/runtime/
 # Git worktree working copies
 .gsd/worktrees/
-# Parallel orchestration IPC and worker status
+# Parallel runtime locks and per-milestone isolation artifacts
 .gsd/parallel/
 # SQLite database and WAL sidecars — authoritative runtime state, local only
 .gsd/gsd.db*
