@@ -1,3 +1,5 @@
+// GSD2 Shared Phase State Coordination Tests
+
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -25,9 +27,15 @@ describe("gsd-phase-state", () => {
 	it("tracks the current phase when active", () => {
 		activateGSD();
 		assert.equal(getCurrentPhase(), null);
-		setCurrentPhase("plan-milestone");
+		assert.equal(setCurrentPhase("plan-milestone"), true);
 		assert.equal(getCurrentPhase(), "plan-milestone");
 		clearCurrentPhase();
+		assert.equal(getCurrentPhase(), null);
+	});
+
+	it("rejects phase changes while inactive", () => {
+		assert.equal(setCurrentPhase("plan-milestone"), false);
+		activateGSD();
 		assert.equal(getCurrentPhase(), null);
 	});
 

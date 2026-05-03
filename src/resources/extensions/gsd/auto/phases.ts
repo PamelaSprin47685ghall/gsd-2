@@ -1470,7 +1470,12 @@ export async function runUnitPhase(
   s.lastGitActionFailure = null;
   s.lastGitActionStatus = null;
   s.lastUnitAgentEndMessages = null;
-  setCurrentPhase(unitType);
+  setCurrentPhase(unitType, {
+    basePath: s.basePath,
+    traceId: `phase:${ic.flowId}`,
+    turnId: `iter-${ic.iteration}`,
+    causedBy: "unit-start",
+  });
   s.lastToolInvocationError = null; // #2883: clear stale error from previous unit
   const unitStartSeq = ic.nextSeq();
   deps.emitJournalEvent({ ts: new Date().toISOString(), flowId: ic.flowId, seq: unitStartSeq, eventType: "unit-start", data: { unitType, unitId } });

@@ -1,9 +1,12 @@
+// GSD2 UOK Turn Observer and DB-Backed Lifecycle Emission
+
 import type {
   TurnCloseoutRecord,
   TurnContract,
   TurnResult,
   UokTurnObserver,
 } from "./contracts.js";
+import { CURRENT_UOK_CONTRACT_VERSION, validateTurnResult } from "./contracts.js";
 import { buildAuditEnvelope, emitUokAuditEvent } from "./audit.js";
 import { writeTurnCloseoutGitRecord, writeTurnGitTransaction } from "./gitops.js";
 import { acquireWriterToken, nextWriteRecord, releaseWriterToken } from "./writer.js";
@@ -144,24 +147,30 @@ export function createTurnObserver(options: CreateTurnObserverOptions): UokTurnO
     onTurnResult(result): void {
       const merged: TurnResult = {
         ...result,
+        version: CURRENT_UOK_CONTRACT_VERSION,
         phaseResults: result.phaseResults.length > 0 ? result.phaseResults : [...phaseResults],
       };
+      const validation = validateTurnResult(merged);
+      if (!validation.ok) {
+        throw new Error(`Invalid UOK turn result: ${validation.issues.map((issue) => `${issue.path}: ${issue.message}`).join("; ")}`);
+      }
 
       if (options.enableAudit) {
         emitUokAuditEvent(
           options.basePath,
           buildAuditEnvelope({
-            traceId: merged.traceId,
-            turnId: merged.turnId,
+            traceId: validation.value.traceId,
+            turnId: validation.value.turnId,
             category: "orchestration",
             type: "turn-result",
             payload: nextSequenceMetadata("audit", "append", {
-              unitType: merged.unitType,
-              unitId: merged.unitId,
-              status: merged.status,
-              failureClass: merged.failureClass,
-              error: merged.error,
-              phaseCount: merged.phaseResults.length,
+              contractVersion: validation.value.version,
+              unitType: validation.value.unitType,
+              unitId: validation.value.unitId,
+              status: validation.value.status,
+              failureClass: validation.value.failureClass,
+              error: validation.value.error,
+              phaseCount: validation.value.phaseResults.length,
             }),
           }),
         );
