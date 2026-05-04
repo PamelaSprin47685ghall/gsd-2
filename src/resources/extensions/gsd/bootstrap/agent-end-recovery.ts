@@ -159,7 +159,11 @@ export async function handleAgentEnd(
       return;
     }
 
-    await pauseAuto(ctx, pi);
+    await pauseAuto(ctx, pi, {
+      message: hasErrorMessage ? String(lastMsg.errorMessage) : "Operation aborted",
+      category: "aborted",
+      isTransient: true,
+    });
     return;
   }
   if (lastMsg && "stopReason" in lastMsg && lastMsg.stopReason === "error") {

@@ -994,7 +994,10 @@ export async function runDispatch(
     // See: https://github.com/gsd-build/gsd-2/issues/2474
     if (dispatchResult.level === "warning") {
       ctx.ui.notify(dispatchResult.reason, "warning");
-      await deps.pauseAuto(ctx, pi);
+      await deps.pauseAuto(ctx, pi, {
+        message: dispatchResult.reason,
+        category: "unknown",
+      });
     } else {
       await closeoutAndStop(ctx, pi, s, deps, dispatchResult.reason);
     }
@@ -1871,13 +1874,27 @@ export async function runUnitPhase(
     }
     await deps.autoCommitUnit?.(s.basePath, unitType, unitId, ctx);
     await emitCancelledUnitEnd(ic, unitType, unitId, unitStartSeq, unitResult.errorContext);
+
+    const cancellationMessage = unitResult.errorContext?.message ?? "unknown";
+    const isSessionCreationFailure = errorCategory === "session-failed";
+
+    if (isSessionCreationFailure) {
+      ctx.ui.notify(
+        `Session creation failed for ${unitType} ${unitId}: ${cancellationMessage}. Stopping auto-mode.`,
+        "warning",
+      );
+      await deps.stopAuto(ctx, pi, `Session creation failed: ${cancellationMessage}`);
+      debugLog("autoLoop", { phase: "exit", reason: "session-failed" });
+      return { action: "break", reason: "session-failed" };
+    }
+
     ctx.ui.notify(
-      `Session creation failed for ${unitType} ${unitId}: ${unitResult.errorContext?.message ?? "unknown"}. Stopping auto-mode.`,
+      `Unit ${unitType} ${unitId} aborted after dispatch: ${cancellationMessage}. Stopping auto-mode.`,
       "warning",
     );
-    await deps.stopAuto(ctx, pi, `Session creation failed: ${unitResult.errorContext?.message ?? "unknown"}`);
-    debugLog("autoLoop", { phase: "exit", reason: "session-failed" });
-    return { action: "break", reason: "session-failed" };
+    await deps.stopAuto(ctx, pi, `Unit aborted: ${cancellationMessage}`);
+    debugLog("autoLoop", { phase: "exit", reason: "unit-aborted" });
+    return { action: "break", reason: "unit-aborted" };
   }
 
   // ── Immediate unit closeout (metrics, activity log, memory) ────────

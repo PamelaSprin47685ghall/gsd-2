@@ -1264,6 +1264,7 @@ export async function pauseAuto(
       activeRunDir: s.activeRunDir,
       autoStartTime: s.autoStartTime,
       milestoneLock: s.sessionMilestoneLock ?? undefined,
+      pauseReason: _errorContext?.message,
     };
     setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, pausedMeta);
   } catch (err) {

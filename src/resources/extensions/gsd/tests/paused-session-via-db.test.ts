@@ -64,6 +64,7 @@ test("readPausedSessionMetadata round-trips a real PausedSessionMetadata payload
     activeRunDir: null,
     autoStartTime: Date.now(),
     milestoneLock: null,
+    pauseReason: "Blocked: waiting for UAT",
   };
   setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, meta);
 
@@ -73,6 +74,7 @@ test("readPausedSessionMetadata round-trips a real PausedSessionMetadata payload
   assert.equal(loaded!.unitType, "plan-slice");
   assert.equal(loaded!.unitId, "M001/S01");
   assert.equal(loaded!.sessionFile, "/tmp/session.jsonl");
+  assert.equal(loaded!.pauseReason, "Blocked: waiting for UAT");
 });
 
 test("readPausedSessionMetadata auto-deletes stale pseudo-milestone pause rows", (t) => {
