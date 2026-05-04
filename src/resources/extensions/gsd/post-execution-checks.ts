@@ -144,12 +144,19 @@ export function resolveImportPath(
     if (existsSync(directPath)) {
       return { exists: true, resolvedPath: directPath };
     }
-    // Only .js/.jsx/.mjs/.cjs imports legitimately fall through for the TS
-    // ESM convention (.js → .ts). Any other explicit extension (.css, .json,
-    // .svg, images, fonts, .ts, .tsx, …) must stay unresolved when the direct
-    // path is missing — otherwise a stray `./missing.css.ts` could shadow a
-    // genuinely missing `./missing.css` import.
-    if (![".js", ".jsx", ".mjs", ".cjs"].includes(explicitExt)) {
+
+    // Known concrete extensions that should NOT fall through to code-shadow
+    // probing when missing. This preserves the "missing.css must stay missing"
+    // guarantee while still allowing dotted module stems like ./route.server
+    // to resolve as ./route.server.ts.
+    const nonFallbackExtensions = new Set([
+      ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+      ".json", ".css", ".scss", ".sass", ".less", ".styl",
+      ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico", ".bmp",
+      ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ]);
+
+    if (nonFallbackExtensions.has(explicitExt) && ![".js", ".jsx", ".mjs", ".cjs"].includes(explicitExt)) {
       return { exists: false, resolvedPath: null };
     }
   }
@@ -222,6 +229,13 @@ export function checkImportResolution(
     const imports = extractRelativeImports(source);
 
     for (const { importPath, lineNum } of imports) {
+      // React Router generated +types modules may not exist on disk during
+      // post-exec checks (generated during framework build). Don't block task
+      // completion on these imports.
+      if (/^\.{1,2}\/\+types\//.test(importPath) || /\/\+types\//.test(importPath)) {
+        continue;
+      }
+
       const resolution = resolveImportPath(importPath, file, basePath);
 
       if (!resolution.exists) {
