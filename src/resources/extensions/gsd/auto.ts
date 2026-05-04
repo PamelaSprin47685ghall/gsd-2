@@ -147,6 +147,7 @@ import {
   MergeConflictError,
   parseSliceBranch,
   setActiveMilestoneId,
+  resolveProjectRoot,
 } from "./worktree.js";
 import { GitServiceImpl } from "./git-service.js";
 import { getPriorSliceCompletionBlocker } from "./dispatch-guard.js";
@@ -1387,7 +1388,8 @@ function buildResolver(): WorktreeResolver {
 export function createWiredAutoOrchestrationModule(
   ctx: ExtensionContext,
   _pi: ExtensionAPI,
-  basePath: string,
+  dispatchBasePath: string,
+  runtimeBasePath = resolveProjectRoot(dispatchBasePath),
 ): AutoOrchestrationModule {
   const flowId = `auto-orchestrator-${Date.now()}`;
   let seq = 0;
@@ -1395,13 +1397,13 @@ export function createWiredAutoOrchestrationModule(
   const deps: AutoOrchestratorDeps = {
     dispatch: {
       async decideNextUnit() {
-        const state = await deriveState(basePath);
+        const state = await deriveState(dispatchBasePath);
         const active = state.activeMilestone;
         if (!active) return null;
 
-        const prefs = loadEffectiveGSDPreferences(basePath)?.preferences;
+        const prefs = loadEffectiveGSDPreferences(dispatchBasePath)?.preferences;
         const action = await resolveDispatch({
-          basePath,
+          basePath: dispatchBasePath,
           mid: active.id,
           midTitle: active.title,
           state,
@@ -1430,7 +1432,7 @@ export function createWiredAutoOrchestrationModule(
     },
     health: {
       async preAdvanceGate() {
-        const gate = await preDispatchHealthGate(basePath);
+        const gate = await preDispatchHealthGate(dispatchBasePath);
         return {
           allow: gate.proceed,
           reason: gate.reason,
@@ -1456,7 +1458,7 @@ export function createWiredAutoOrchestrationModule(
     },
     runtime: {
       async ensureLockOwnership() {
-        const status = getSessionLockStatus(basePath);
+        const status = getSessionLockStatus(runtimeBasePath);
         if (status === "in_use_by_other") {
           throw new Error("session lock held by another process");
         }
@@ -1474,13 +1476,13 @@ export function createWiredAutoOrchestrationModule(
                   ? "dispatch-stop"
                   : event.name === "advance-error"
                     ? "iteration-end"
-                    : event.name === "advance-retry"
+                    : event.name === "advance-paused" || event.name === "advance-retry"
                       ? "guard-block"
                       : event.name === "stop"
                       ? "terminal"
                       : "iteration-end";
 
-        _emitJournalEvent(basePath, {
+        _emitJournalEvent(runtimeBasePath, {
           ts: new Date().toISOString(),
           flowId,
           seq: ++seq,
@@ -1508,7 +1510,7 @@ export function createWiredAutoOrchestrationModule(
 }
 
 function ensureOrchestrationModule(ctx: ExtensionContext, pi: ExtensionAPI, basePath: string): void {
-  s.orchestration = createWiredAutoOrchestrationModule(ctx, pi, basePath);
+  s.orchestration = createWiredAutoOrchestrationModule(ctx, pi, basePath, lockBase());
 }
 
 /**
@@ -2197,7 +2199,9 @@ export async function dispatchHookUnit(
   }
 
   s.basePath = targetBasePath;
-  ensureOrchestrationModule(ctx, pi, s.basePath);
+  if (!s.orchestration) {
+    ensureOrchestrationModule(ctx, pi, s.basePath);
+  }
 
   const hookUnitType = `hook/${hookName}`;
   const hookStartedAt = Date.now();

@@ -105,7 +105,7 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
       this.bumpTransition();
 
       const journalName = result.kind === "paused"
-        ? "advance-retry"
+        ? "advance-paused"
         : "advance-error";
       await this.deps.runtime.journalTransition({ name: journalName, reason: recovery.reason });
 
@@ -128,6 +128,9 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
   }
 
   public async stop(reason: string): Promise<AutoAdvanceResult> {
+    if (this.status.phase === "stopped") {
+      return { kind: "stopped", reason };
+    }
     await this.deps.worktree.cleanupOnStop(reason);
     this.status.phase = "stopped";
     this.status.activeUnit = undefined;

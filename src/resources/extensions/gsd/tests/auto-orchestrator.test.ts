@@ -233,7 +233,7 @@ test("recovery retry maps to paused result", async () => {
   assert.equal(result.kind, "paused");
   assert.equal(result.reason, "transient");
   assert.equal(orchestrator.getStatus().phase, "paused");
-  assert.ok(calls.includes("journal:advance-retry"));
+  assert.ok(calls.includes("journal:advance-paused"));
   assert.ok(calls.includes("notify:pause"));
 });
 
