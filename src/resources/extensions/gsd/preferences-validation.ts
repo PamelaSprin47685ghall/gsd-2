@@ -14,7 +14,7 @@ import { normalizeStringArray } from "../shared/format-utils.js";
 
 import {
   KNOWN_PREFERENCE_KEYS,
-  KNOWN_UNIT_TYPES,
+  KNOWN_UNIT_LABELS,
 
   SKILL_ACTIONS,
   type WorkflowMode,
@@ -441,7 +441,7 @@ export function validatePreferences(preferences: GSDPreferences): {
   if (preferences.post_unit_hooks && Array.isArray(preferences.post_unit_hooks)) {
     const validHooks: PostUnitHookConfig[] = [];
     const seenNames = new Set<string>();
-    const knownUnitTypes = new Set<string>(KNOWN_UNIT_TYPES);
+    const knownUnitTypes = new Set<string>(KNOWN_UNIT_LABELS);
     for (const hook of preferences.post_unit_hooks) {
       if (!hook || typeof hook !== "object") {
         errors.push("post_unit_hooks entry must be an object");
@@ -503,7 +503,7 @@ export function validatePreferences(preferences: GSDPreferences): {
   if (preferences.pre_dispatch_hooks && Array.isArray(preferences.pre_dispatch_hooks)) {
     const validPreHooks: PreDispatchHookConfig[] = [];
     const seenPreNames = new Set<string>();
-    const knownUnitTypes = new Set<string>(KNOWN_UNIT_TYPES);
+    const knownUnitTypes = new Set<string>(KNOWN_UNIT_LABELS);
     const validActions = new Set(["modify", "skip", "replace"]);
     for (const hook of preferences.pre_dispatch_hooks) {
       if (!hook || typeof hook !== "object") {

@@ -10,7 +10,10 @@ import {
   closeDatabase,
   _getAdapter,
   insertGateRow,
+  upsertRequirement,
+  getAllMilestones,
 } from "../gsd-db.ts";
+import { deriveState, invalidateStateCache } from "../state.ts";
 import { markApprovalGateVerified, markDepthVerified, clearDiscussionFlowState, loadWriteGateSnapshot, setPendingGate } from "../bootstrap/write-gate.ts";
 import {
   executeCompleteMilestone,
@@ -676,7 +679,7 @@ test("executeSummarySave removes sibling CONTEXT-DRAFT when writing milestone CO
       "CONTEXT-DRAFT.md should be removed after final CONTEXT.md is written",
     );
   } finally {
-    clearDiscussionFlowState();
+    clearDiscussionFlowState(base);
     closeDatabase();
     cleanup(base);
   }
@@ -689,11 +692,37 @@ test("executeSummarySave supports root-level deep planning artifacts", async () 
 
     const project = await inProjectDir(base, () => executeSummarySave({
       artifact_type: "PROJECT",
-      content: "# Project\n\n## What This Is\n\nA root project artifact.",
+      content: [
+        "# Project",
+        "",
+        "## What This Is",
+        "",
+        "A root project artifact.",
+        "",
+        "## Milestone Sequence",
+        "",
+        "- [ ] M001: Foundation - Establish the first runnable slice.",
+        "",
+      ].join("\n"),
     }, base));
     assert.equal(project.isError, undefined);
     assert.equal(project.details.path, "PROJECT.md");
     assert.ok(existsSync(join(base, ".gsd", "PROJECT.md")));
+
+    upsertRequirement({
+      id: "R001",
+      class: "primary-user-loop",
+      status: "active",
+      description: "User can add a task",
+      why: "Core loop",
+      source: "user",
+      primary_owner: "M001/none yet",
+      supporting_slices: "none",
+      validation: "unmapped",
+      notes: "",
+      full_content: "",
+      superseded_by: null,
+    });
 
     const requirements = await inProjectDir(base, () => executeSummarySave({
       artifact_type: "REQUIREMENTS",
@@ -701,6 +730,7 @@ test("executeSummarySave supports root-level deep planning artifacts", async () 
     }, base));
     assert.equal(requirements.isError, undefined);
     assert.equal(requirements.details.path, "REQUIREMENTS.md");
+    assert.equal(requirements.details.content_source, "requirements_table");
     assert.ok(existsSync(join(base, ".gsd", "REQUIREMENTS.md")));
 
     const db = _getAdapter();
@@ -720,13 +750,114 @@ test("executeSummarySave supports root-level deep planning artifacts", async () 
   }
 });
 
+test("executeSummarySave registers PROJECT milestone sequence for the next run", async () => {
+  const base = makeTmpBase();
+  try {
+    openTestDb(base);
+
+    const result = await inProjectDir(base, () => executeSummarySave({
+      artifact_type: "PROJECT",
+      content: [
+        "# Project",
+        "",
+        "## What This Is",
+        "",
+        "Deep project setup output.",
+        "",
+        "## Project Shape",
+        "",
+        "**Complexity:** complex",
+        "**Why:** It spans multiple delivery steps.",
+        "",
+        "## Capability Contract",
+        "",
+        "See .gsd/REQUIREMENTS.md.",
+        "",
+        "## Milestone Sequence",
+        "",
+        "- [ ] M001: Foundation - Establish the first runnable slice.",
+        "- [ ] M002: Polish - Follow-up experience work.",
+        "",
+      ].join("\n"),
+    }, base));
+
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(result.details.registeredMilestones, ["M001", "M002"]);
+
+    const milestones = getAllMilestones();
+    assert.deepEqual(
+      milestones.map((m) => [m.id, m.title, m.status]),
+      [
+        ["M001", "Foundation", "queued"],
+        ["M002", "Polish", "queued"],
+      ],
+    );
+
+    invalidateStateCache();
+    const state = await deriveState(base);
+    assert.equal(state.activeMilestone?.id, "M001");
+    assert.equal(state.phase, "pre-planning");
+    assert.equal(state.registry[0]?.status, "active");
+    assert.equal(state.registry[1]?.status, "pending");
+  } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
+test("executeSummarySave hard-fails when milestone registration throws so silent No-Active-Milestone is impossible", async () => {
+  const base = makeTmpBase();
+  try {
+    openTestDb(base);
+    const db = _getAdapter();
+    assert.ok(db, "DB should be open");
+    const originalPrepare = db.prepare.bind(db);
+    (db as any).prepare = (sql: string) => {
+      if (sql.includes("INSERT OR IGNORE INTO milestones")) {
+        throw new Error("simulated milestone registration failure");
+      }
+      return originalPrepare(sql);
+    };
+
+    const result = await inProjectDir(base, () => executeSummarySave({
+      artifact_type: "PROJECT",
+      content: [
+        "# Project",
+        "",
+        "## What This Is",
+        "",
+        "Deep project setup output.",
+        "",
+        "## Milestone Sequence",
+        "",
+        "- [ ] M001: Foundation - Establish the first runnable slice.",
+        "",
+      ].join("\n"),
+    }, base));
+
+    // The artifact is persisted before registration runs, but registration must
+    // surface as isError so the LLM retries (INSERT OR IGNORE makes it idempotent)
+    // instead of announcing "ready" while the DB has zero milestone rows.
+    assert.equal(result.isError, true);
+    assert.equal(result.details.path, "PROJECT.md");
+    assert.equal(result.details.error, "milestone_registration_threw");
+    assert.match(String(result.details.registration_error), /simulated milestone registration failure/);
+    assert.match(result.content[0].text, /milestone registration failed/);
+    assert.match(result.content[0].text, /idempotent/);
+    assert.ok(existsSync(join(base, ".gsd", "PROJECT.md")));
+    const artifact = originalPrepare("SELECT path FROM artifacts WHERE path = ?").get("PROJECT.md");
+    assert.equal(artifact?.path, "PROJECT.md");
+  } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
 test("executeSummarySave blocks final root artifacts while approval gate is pending", async () => {
   const base = makeTmpBase();
   try {
     openTestDb(base);
-    await inProjectDir(base, async () => {
-      setPendingGate("depth_verification_requirements_confirm");
-    });
+    setPendingGate("depth_verification_requirements_confirm", base);
 
     const result = await inProjectDir(base, () => executeSummarySave({
       artifact_type: "REQUIREMENTS",
@@ -745,7 +876,7 @@ test("executeSummarySave blocks final root artifacts while approval gate is pend
     assert.equal(draft.isError, undefined);
     assert.ok(existsSync(join(base, ".gsd", "REQUIREMENTS-DRAFT.md")));
   } finally {
-    clearDiscussionFlowState();
+    clearDiscussionFlowState(base);
     closeDatabase();
     cleanup(base);
   }
@@ -757,9 +888,22 @@ test("executeSummarySave requires verified root approval in deep mode", async ()
     writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\nplanning_depth: deep\n---\n");
     openTestDb(base);
 
+    const projectFixture = [
+      "# Project",
+      "",
+      "## What This Is",
+      "",
+      "A root project artifact.",
+      "",
+      "## Milestone Sequence",
+      "",
+      "- [ ] M001: Foundation - Establish the first runnable slice.",
+      "",
+    ].join("\n");
+
     const blocked = await inProjectDir(base, () => executeSummarySave({
       artifact_type: "PROJECT",
-      content: "# Project\n\n## What This Is\n\nA root project artifact.",
+      content: projectFixture,
     }, base));
 
     assert.equal(blocked.isError, true);
@@ -767,20 +911,120 @@ test("executeSummarySave requires verified root approval in deep mode", async ()
     assert.match(blocked.content[0].text, /fail-closed/);
     assert.equal(existsSync(join(base, ".gsd", "PROJECT.md")), false);
 
-    await inProjectDir(base, async () => {
-      markApprovalGateVerified("depth_verification_project_confirm", base);
-    });
+    markApprovalGateVerified("depth_verification_project_confirm", base);
 
     const unblocked = await inProjectDir(base, () => executeSummarySave({
       artifact_type: "PROJECT",
-      content: "# Project\n\n## What This Is\n\nA root project artifact.",
+      content: projectFixture,
     }, base));
 
     assert.equal(unblocked.isError, undefined);
     assert.equal(unblocked.details.path, "PROJECT.md");
     assert.ok(existsSync(join(base, ".gsd", "PROJECT.md")));
   } finally {
-    clearDiscussionFlowState();
+    clearDiscussionFlowState(base);
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
+test("executeSummarySave renders final REQUIREMENTS from the DB source of truth", async () => {
+  const base = makeTmpBase();
+  try {
+    openTestDb(base);
+    markApprovalGateVerified("depth_verification_requirements_confirm", base);
+
+    upsertRequirement({
+      id: "R001",
+      class: "primary-user-loop",
+      status: "active",
+      description: "User can add a task",
+      why: "Core loop",
+      source: "user",
+      primary_owner: "M001/none yet",
+      supporting_slices: "none",
+      validation: "unmapped",
+      notes: "saved through requirement tool",
+      full_content: "",
+      superseded_by: null,
+    });
+
+    const requirementsPath = join(base, ".gsd", "REQUIREMENTS.md");
+    const bloatedMarkdown = [
+      "# Requirements",
+      "",
+      "## Active",
+      "",
+      ...Array.from({ length: 30 }, (_, i) => [
+        `### R${String(i + 100).padStart(3, "0")} — Duplicate`,
+        "- Class: primary-user-loop",
+        "- Status: active",
+        "- Description: Duplicate retry row",
+        "- Why it matters: Retry drift",
+        "- Source: test",
+        "- Primary owning slice: M001/none yet",
+        "- Supporting slices: none",
+        "- Validation: unmapped",
+        "",
+      ].join("\n")),
+    ].join("\n");
+    writeFileSync(requirementsPath, bloatedMarkdown);
+
+    const result = await inProjectDir(base, () => executeSummarySave({
+      artifact_type: "REQUIREMENTS",
+      content: "# Requirements\n\n## Active\n\n### R999 — Wrong markdown source\n\n- Description: This content must not become canonical.\n",
+    }, base));
+
+    assert.equal(result.isError, undefined);
+    assert.equal(result.details.path, "REQUIREMENTS.md");
+    assert.equal(result.details.content_source, "requirements_table");
+
+    const content = readFileSync(requirementsPath, "utf-8");
+    assert.match(content, /### R001 — User can add a task/);
+    assert.match(content, /## Validated/);
+    assert.match(content, /## Deferred/);
+    assert.match(content, /## Out of Scope/);
+    assert.doesNotMatch(content, /R999|Wrong markdown source|This content must not become canonical/);
+    assert.ok(
+      Buffer.byteLength(content, "utf-8") < Buffer.byteLength(bloatedMarkdown, "utf-8") * 0.5,
+      "test setup proves final DB projection may be much smaller than accumulated retry output",
+    );
+
+    const db = _getAdapter();
+    const reqRows = db!
+      .prepare("SELECT id, description FROM requirements ORDER BY id")
+      .all() as Array<Record<string, unknown>>;
+    assert.deepEqual(
+      reqRows.map((row) => [row.id, row.description]),
+      [["R001", "User can add a task"]],
+      "summary save must not parse markdown back into requirements rows",
+    );
+
+    const artifact = db!
+      .prepare("SELECT full_content FROM artifacts WHERE path = ?")
+      .get("REQUIREMENTS.md") as Record<string, unknown>;
+    assert.equal(artifact.full_content, content);
+  } finally {
+    clearDiscussionFlowState(base);
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
+test("executeSummarySave rejects final REQUIREMENTS when the DB source is empty", async () => {
+  const base = makeTmpBase();
+  try {
+    openTestDb(base);
+
+    const result = await inProjectDir(base, () => executeSummarySave({
+      artifact_type: "REQUIREMENTS",
+      content: "# Requirements\n\n## Active\n\n",
+    }, base));
+
+    assert.equal(result.isError, true);
+    assert.equal(result.details.error, "no_active_requirements");
+    assert.match(result.content[0].text, /no active requirements found/);
+  } finally {
     closeDatabase();
     cleanup(base);
   }
@@ -871,7 +1115,7 @@ test("executeSummarySave CONTEXT HARD BLOCK clears after write-gate state file i
   process.env.GSD_PERSIST_WRITE_GATE_STATE = "1";
   try {
     openTestDb(base);
-    clearDiscussionFlowState();
+    clearDiscussionFlowState(base);
 
     // First call: CONTEXT artifact without depth verification → HARD BLOCK
     const blocked = await inProjectDir(base, () => executeSummarySave({
@@ -922,7 +1166,7 @@ test("executeSummarySave CONTEXT HARD BLOCK clears after write-gate state file i
     } else {
       process.env.GSD_PERSIST_WRITE_GATE_STATE = originalEnv;
     }
-    clearDiscussionFlowState();
+    clearDiscussionFlowState(base);
     closeDatabase();
     cleanup(base);
   }

@@ -8,7 +8,7 @@ Auto mode is GSD's autonomous execution engine. Run `/gsd auto`, walk away, come
 /gsd auto
 ```
 
-GSD reads `.gsd/STATE.md`, determines the next unit of work, creates a fresh AI session with all relevant context, and lets the AI execute. When it finishes, GSD reads disk state again and dispatches the next unit. This continues until the milestone is complete.
+GSD derives the next unit of work from the authoritative SQLite database at the project root, creates a fresh AI session with all relevant context, and lets the AI execute. When it finishes, GSD persists the result to the database, refreshes markdown projections such as `STATE.md`, and dispatches the next unit. This continues until the milestone is complete.
 
 ## The Execution Loop
 
@@ -26,6 +26,12 @@ Plan → Execute (per task) → Complete → Reassess Roadmap → Next Slice
 - **Reassess** — checks if the roadmap still makes sense after what was learned
 - **Validate** — after all slices, verifies success criteria were actually met
 
+## State Authority
+
+The GSD database is the runtime source of truth for milestones, slices, tasks, requirements, decisions, summaries, and completion status. Markdown files in `.gsd/` are rendered projections for review, prompts, and git-friendly history; editing a projection does not override the database unless a GSD command imports or saves the change.
+
+In worktree mode, the project-root database and project-root `.gsd/` state remain authoritative. Worktree markdown projections are diagnostics, not state to sync back. Runtime state derivation does not silently rebuild from markdown when the database is unavailable. The legacy markdown fallback is only enabled with `GSD_ALLOW_MARKDOWN_DERIVE_FALLBACK=1` for tests and explicit recovery work.
+
 ## Deep Planning Mode
 
 Enable project-level deep planning with `/gsd new-project --deep`, `/gsd new-milestone --deep`, or this project preference:
@@ -36,7 +42,7 @@ planning_depth: deep
 
 Deep mode runs one-time discovery gates before normal milestone planning:
 
-```
+```text
 Workflow Preferences -> Project Context -> Requirements -> Research Decision -> Optional Project Research -> Milestone Context/Roadmap
 ```
 
@@ -62,7 +68,7 @@ Press **Escape**. The conversation is preserved. You can interact with the agent
 /gsd auto
 ```
 
-Auto mode reads disk state and picks up where it left off.
+Auto mode derives the latest database state and picks up where it left off.
 
 ### Stop
 
@@ -91,6 +97,19 @@ Fire-and-forget thought capture. Captures are triaged automatically between task
 ## Fresh Session Per Unit
 
 Every task gets a clean AI context window. No accumulated garbage, no quality degradation from context bloat. The dispatch prompt includes everything needed — task plans, prior summaries, decisions, dependency context — so the AI starts oriented.
+
+## Context Mode
+
+Context Mode is enabled by default for auto-mode runs. Each unit receives manifest-driven guidance to preserve the conversation window: use `gsd_exec` for noisy codebase scans, builds, tests, and diagnostics; use `gsd_exec_search` before repeating a prior sandboxed run; and use `gsd_resume` after compaction or session resume to read `.gsd/last-snapshot.md`.
+
+`gsd_exec` writes full stdout/stderr and metadata under `.gsd/exec/`, then returns only a short digest to the agent. This keeps large command output out of the LLM context while preserving exact evidence on disk. Opt out with:
+
+```yaml
+context_mode:
+  enabled: false
+```
+
+You can also tune sandbox behavior with `context_mode.exec_timeout_ms`, `context_mode.exec_stdout_cap_bytes`, and `context_mode.exec_digest_chars`.
 
 ## Runtime Tool Policy
 

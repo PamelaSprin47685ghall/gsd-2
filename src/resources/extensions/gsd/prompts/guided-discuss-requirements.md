@@ -21,8 +21,12 @@ Before your first action, print this banner verbatim in chat:
 ## Pre-flight
 
 1. Read `.gsd/PROJECT.md` end-to-end. If it does not exist, STOP and emit: `"PROJECT.md missing — run discuss-project first."`
-2. Extract: Core Value, Anti-goals, Constraints, Milestone Sequence.
+2. Extract: Core Value, Anti-goals, Constraints, Milestone Sequence, and the project shape verdict — read the `## Project Shape` section and look for `**Complexity:**` (verdict is either `simple` or `complex`; default to `complex` if the section is missing or unclear).
 3. Check for existing `.gsd/REQUIREMENTS.md` — if present, this is a refinement pass, not a fresh write. Read existing requirements and treat them as the working set.
+
+**Shape-dependent cadence:**
+- **`simple`** — favor a single fast pass: extract requirements directly from PROJECT.md, ask 1–2 plain-text clarifying questions only if a class or status assignment is genuinely ambiguous, then write REQUIREMENTS.md.
+- **`complex`** — full multi-round questioning with structured 3–4-option questions where alternatives matter.
 
 ---
 
@@ -51,7 +55,7 @@ Ask **1–3 questions per round**. Each round targets one dimension:
 
 **Never fabricate or simulate user input.** Wait for actual responses.
 
-**If `{{structuredQuestionsAvailable}}` is `true`:** use `ask_user_questions`. Every question object MUST include a stable lowercase `id`. For class assignments, present the allowed classes as multi-select options. For status, present the four statuses as exclusive options. Ask 1–3 questions per call. Wait for each tool result before asking the next round.
+**If `{{structuredQuestionsAvailable}}` is `true`:** use `ask_user_questions`. Every question object MUST include a stable lowercase `id`. For class assignments, present the allowed classes as multi-select options. For status, present the four statuses as exclusive options. In **`complex`** mode, any free-form question MUST present **3 or 4 concrete, researched options** plus a final **"Other — let me discuss"** option grounded in the investigation above. The class-assignment and status questions are exempt — they have fixed enumerations. Ask 1–3 questions per call. Wait for each tool result before asking the next round.
 
 **If `{{structuredQuestionsAvailable}}` is `false`:** ask in plain text. Keep each round to 1–3 questions.
 
@@ -104,7 +108,7 @@ Before the wrap-up gate, verify:
 
 If they adjust, absorb and re-verify.
 
-**CRITICAL — Non-bypassable gate:** The system blocks REQUIREMENTS.md writes until explicit confirmation. Never rationalize past it.
+**CRITICAL — Confirmation gate:** Do not write final REQUIREMENTS.md until explicit confirmation. Never rationalize past it.
 
 ---
 
@@ -114,7 +118,7 @@ Once the user confirms:
 
 1. Use the **Requirements** output template (inlined above) to render the final markdown in working memory.
 2. Every entry must conform to the `R###` format with all listed fields. Use `gsd_requirement_save` (NOT plain file edit) for each requirement so DB state is saved first.
-3. After all `gsd_requirement_save` calls complete, call `gsd_summary_save` with `artifact_type: "REQUIREMENTS"` and the full rendered markdown as `content`; omit `milestone_id`. This writes `.gsd/REQUIREMENTS.md` and persists the final requirements artifact.
+3. After all `gsd_requirement_save` calls complete, call `gsd_summary_save` with `artifact_type: "REQUIREMENTS"`; omit `milestone_id`. The requirements table is the source of truth, and this tool renders `.gsd/REQUIREMENTS.md` from DB state. Pass the rendered markdown as `content` for audit context only; do not rely on markdown to update DB rows.
 4. The file MUST contain all required sections: `## Active`, `## Validated`, `## Deferred`, `## Out of Scope`, `## Traceability`, `## Coverage Summary`. Empty sections are OK; missing sections are not.
 5. Print the final coverage summary in chat: `Active: N | Validated: N | Deferred: N | Out of Scope: N | Mapped to slices: N | Unmapped active: N`.
 6. Do NOT use `artifact_type: "CONTEXT"` and do NOT pass `milestone_id: "REQUIREMENTS"`; that creates a fake milestone instead of `.gsd/REQUIREMENTS.md`.

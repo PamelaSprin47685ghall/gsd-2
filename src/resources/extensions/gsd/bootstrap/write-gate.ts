@@ -63,20 +63,42 @@ const QUEUE_SAFE_TOOLS = new Set([
  */
 const BASH_READ_ONLY_RE = /^\s*(cat|head|tail|less|more|wc|file|stat|du|df|which|type|echo|printf|ls|find|grep|rg|awk|sed\b(?!.*-i)|sort|uniq|diff|comm|tr|cut|tee\s+-a\s+\/dev\/null|git\s+(log|show|diff|status|branch|tag|remote|rev-parse|ls-files|blame|shortlog|describe|stash\s+list|config\s+--get|cat-file)|gh\s+(issue|pr|api|repo|release)\s+(view|list|diff|status|checks)|mkdir\s+-p\s+\.gsd|rtk\s|npm\s+run\s+(test|test:\w+|lint|lint:\w+|typecheck|type-check|type-check:\w+|check|verify|audit|outdated|format:check|ci|validate)\b|npm\s+(ls|list|info|view|show|outdated|audit|explain|doctor|ping|--version|-v)\b|npx\s|tsx\s|node\s+(--print|--version|-v\b)|python[23]?\s+(-c\s+'[^']*'|--version|-V\b|-m\s+(pip\s+show|pip\s+list|site))|pip[23]?\s+(show|list|freeze|check|index\s+versions)\b|jq\s|yq\s|curl\s+(-s\b|--silent\b)(?!\s+[^|>]*\s-[oO]\b)(?!\s+[^|>]*\s--output\b)[^|>]*$|openssl\s+(version|x509|s_client)|env\b|printenv\b|true\b|false\b)/;
 
-const verifiedDepthMilestones = new Set<string>();
-const verifiedApprovalGates = new Set<string>();
-let activeQueuePhase = false;
+interface InMemoryWriteGateState {
+  verifiedDepthMilestones: Set<string>;
+  verifiedApprovalGates: Set<string>;
+  activeQueuePhase: boolean;
+  pendingGateId: string | null;
+}
+
+function createEmptyWriteGateState(): InMemoryWriteGateState {
+  return {
+    verifiedDepthMilestones: new Set<string>(),
+    verifiedApprovalGates: new Set<string>(),
+    activeQueuePhase: false,
+    pendingGateId: null,
+  };
+}
+
+const writeGateStatesByBasePath = new Map<string, InMemoryWriteGateState>();
+
+function writeGateStateKey(basePath: string): string {
+  return resolve(basePath);
+}
+
+function getWriteGateState(basePath: string = process.cwd()): InMemoryWriteGateState {
+  const key = writeGateStateKey(basePath);
+  let state = writeGateStatesByBasePath.get(key);
+  if (!state) {
+    state = createEmptyWriteGateState();
+    writeGateStatesByBasePath.set(key, state);
+  }
+  return state;
+}
 
 /**
- * Discussion gate enforcement state.
- *
- * When ask_user_questions is called with a recognized gate question ID,
- * we track the pending gate. Until the gate is confirmed (user selects the
- * first/recommended option), all non-read-only tool calls are blocked.
- * This mechanically prevents the model from rationalizing past failed or
- * cancelled gate questions.
+ * Discussion gate enforcement state is scoped per basePath so multiple
+ * workspaces can coexist in the same process without sharing gate state.
  */
-let pendingGateId: string | null = null;
 
 /**
  * Recognized gate question ID patterns.
@@ -119,25 +141,26 @@ function shouldPersistWriteGateSnapshot(env: NodeJS.ProcessEnv = process.env): b
   return v !== "0" && v !== "false";
 }
 
-function writeGateSnapshotPath(basePath: string = process.cwd()): string {
+function writeGateSnapshotPath(basePath: string): string {
   return join(basePath, ".gsd", "runtime", "write-gate-state.json");
 }
 
-function currentWriteGateSnapshot(): WriteGateSnapshot {
+function currentWriteGateSnapshot(basePath: string = process.cwd()): WriteGateSnapshot {
+  const state = getWriteGateState(basePath);
   return {
-    verifiedDepthMilestones: [...verifiedDepthMilestones].sort(),
-    verifiedApprovalGates: [...verifiedApprovalGates].sort(),
-    activeQueuePhase,
-    pendingGateId,
+    verifiedDepthMilestones: [...state.verifiedDepthMilestones].sort(),
+    verifiedApprovalGates: [...state.verifiedApprovalGates].sort(),
+    activeQueuePhase: state.activeQueuePhase,
+    pendingGateId: state.pendingGateId,
   };
 }
 
-function persistWriteGateSnapshot(basePath: string = process.cwd()): void {
+function persistWriteGateSnapshot(basePath: string): void {
   if (!shouldPersistWriteGateSnapshot()) return;
   const path = writeGateSnapshotPath(basePath);
   mkdirSync(join(basePath, ".gsd", "runtime"), { recursive: true });
   const tempPath = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
-  writeFileSync(tempPath, JSON.stringify(currentWriteGateSnapshot(), null, 2), "utf-8");
+  writeFileSync(tempPath, JSON.stringify(currentWriteGateSnapshot(basePath), null, 2), "utf-8");
   try {
     renameSync(tempPath, path);
   } catch (err: unknown) {
@@ -152,7 +175,7 @@ function persistWriteGateSnapshot(basePath: string = process.cwd()): void {
   }
 }
 
-function clearPersistedWriteGateSnapshot(basePath: string = process.cwd()): void {
+function clearPersistedWriteGateSnapshot(basePath: string): void {
   if (!shouldPersistWriteGateSnapshot()) return;
   const path = writeGateSnapshotPath(basePath);
   try {
@@ -185,32 +208,35 @@ const EMPTY_SNAPSHOT: WriteGateSnapshot = {
   pendingGateId: null,
 };
 
-export function loadWriteGateSnapshot(basePath: string = process.cwd()): WriteGateSnapshot {
+export function loadWriteGateSnapshot(basePath: string): WriteGateSnapshot {
   const path = writeGateSnapshotPath(basePath);
   if (!existsSync(path)) {
     // When persist mode is active and the file has been deleted, treat it as a
     // full state reset so deleting the file clears the HARD BLOCK gate.
     // In non-persist mode the file is never written, so fall back to in-memory.
     if (shouldPersistWriteGateSnapshot()) return EMPTY_SNAPSHOT;
-    return currentWriteGateSnapshot();
+    return currentWriteGateSnapshot(basePath);
   }
   try {
     return normalizeWriteGateSnapshot(JSON.parse(readFileSync(path, "utf-8")));
   } catch {
-    return currentWriteGateSnapshot();
+    return currentWriteGateSnapshot(basePath);
   }
 }
 
-export function isDepthVerified(): boolean {
-  return verifiedDepthMilestones.size > 0;
+export function isDepthVerified(basePath: string = process.cwd()): boolean {
+  return getWriteGateState(basePath).verifiedDepthMilestones.size > 0;
 }
 
 /**
  * Check whether a specific milestone has passed depth verification.
  */
-export function isMilestoneDepthVerified(milestoneId: string | null | undefined): boolean {
+export function isMilestoneDepthVerified(
+  milestoneId: string | null | undefined,
+  basePath: string = process.cwd(),
+): boolean {
   if (!milestoneId) return false;
-  return verifiedDepthMilestones.has(milestoneId);
+  return getWriteGateState(basePath).verifiedDepthMilestones.has(milestoneId);
 }
 
 export function isMilestoneDepthVerifiedInSnapshot(
@@ -221,39 +247,37 @@ export function isMilestoneDepthVerifiedInSnapshot(
   return snapshot.verifiedDepthMilestones.includes(milestoneId);
 }
 
-export function isQueuePhaseActive(): boolean {
-  return activeQueuePhase;
+export function isQueuePhaseActive(basePath: string = process.cwd()): boolean {
+  return getWriteGateState(basePath).activeQueuePhase;
 }
 
-export function setQueuePhaseActive(active: boolean): void {
-  activeQueuePhase = active;
-  persistWriteGateSnapshot();
+export function setQueuePhaseActive(active: boolean, basePath: string): void {
+  getWriteGateState(basePath).activeQueuePhase = active;
+  persistWriteGateSnapshot(basePath);
 }
 
-export function resetWriteGateState(): void {
-  verifiedDepthMilestones.clear();
-  verifiedApprovalGates.clear();
-  pendingGateId = null;
-  persistWriteGateSnapshot();
+export function resetWriteGateState(basePath: string): void {
+  const state = getWriteGateState(basePath);
+  state.verifiedDepthMilestones.clear();
+  state.verifiedApprovalGates.clear();
+  state.pendingGateId = null;
+  persistWriteGateSnapshot(basePath);
 }
 
-export function clearDiscussionFlowState(): void {
-  verifiedDepthMilestones.clear();
-  verifiedApprovalGates.clear();
-  activeQueuePhase = false;
-  pendingGateId = null;
-  clearPersistedWriteGateSnapshot();
+export function clearDiscussionFlowState(basePath: string): void {
+  writeGateStatesByBasePath.delete(writeGateStateKey(basePath));
+  clearPersistedWriteGateSnapshot(basePath);
 }
 
 export function markDepthVerified(milestoneId?: string | null, basePath: string = process.cwd()): void {
   if (!milestoneId) return;
-  verifiedDepthMilestones.add(milestoneId);
+  getWriteGateState(basePath).verifiedDepthMilestones.add(milestoneId);
   persistWriteGateSnapshot(basePath);
 }
 
 export function markApprovalGateVerified(gateId?: string | null, basePath: string = process.cwd()): void {
   if (!gateId) return;
-  verifiedApprovalGates.add(gateId);
+  getWriteGateState(basePath).verifiedApprovalGates.add(gateId);
   persistWriteGateSnapshot(basePath);
 }
 
@@ -292,27 +316,28 @@ function extractContextMilestoneId(inputPath: string): string | null {
 /**
  * Mark a gate as pending (called when ask_user_questions is invoked with a gate ID).
  */
-export function setPendingGate(gateId: string): void {
-  pendingGateId = gateId;
-  verifiedApprovalGates.delete(gateId);
+export function setPendingGate(gateId: string, basePath: string): void {
+  const state = getWriteGateState(basePath);
+  state.pendingGateId = gateId;
+  state.verifiedApprovalGates.delete(gateId);
   const milestoneId = extractDepthVerificationMilestoneId(gateId);
-  if (milestoneId) verifiedDepthMilestones.delete(milestoneId);
-  persistWriteGateSnapshot();
+  if (milestoneId) state.verifiedDepthMilestones.delete(milestoneId);
+  persistWriteGateSnapshot(basePath);
 }
 
 /**
  * Clear the pending gate (called when the user confirms).
  */
-export function clearPendingGate(): void {
-  pendingGateId = null;
-  persistWriteGateSnapshot();
+export function clearPendingGate(basePath: string): void {
+  getWriteGateState(basePath).pendingGateId = null;
+  persistWriteGateSnapshot(basePath);
 }
 
 /**
  * Get the currently pending gate, if any.
  */
-export function getPendingGate(): string | null {
-  return pendingGateId;
+export function getPendingGate(basePath: string = process.cwd()): string | null {
+  return getWriteGateState(basePath).pendingGateId;
 }
 
 /**
@@ -326,8 +351,9 @@ export function shouldBlockPendingGate(
   toolName: string,
   milestoneId: string | null,
   queuePhaseActive?: boolean,
+  basePath: string = process.cwd(),
 ): { block: boolean; reason?: string } {
-  return shouldBlockPendingGateInSnapshot(currentWriteGateSnapshot(), toolName, milestoneId, queuePhaseActive);
+  return shouldBlockPendingGateInSnapshot(currentWriteGateSnapshot(basePath), toolName, milestoneId, queuePhaseActive);
 }
 
 export function shouldBlockPendingGateInSnapshot(
@@ -361,8 +387,9 @@ export function shouldBlockPendingGateBash(
   command: string,
   milestoneId: string | null,
   queuePhaseActive?: boolean,
+  basePath: string = process.cwd(),
 ): { block: boolean; reason?: string } {
-  return shouldBlockPendingGateBashInSnapshot(currentWriteGateSnapshot(), command, milestoneId, queuePhaseActive);
+  return shouldBlockPendingGateBashInSnapshot(currentWriteGateSnapshot(basePath), command, milestoneId, queuePhaseActive);
 }
 
 export function shouldBlockPendingGateBashInSnapshot(
@@ -419,6 +446,7 @@ export function shouldBlockContextWrite(
   inputPath: string,
   milestoneId: string | null,
   _queuePhaseActive?: boolean,
+  basePath: string = process.cwd(),
 ): { block: boolean; reason?: string } {
   if (toolName !== "write") return { block: false };
   if (!MILESTONE_CONTEXT_RE.test(inputPath)) return { block: false };
@@ -435,7 +463,7 @@ export function shouldBlockContextWrite(
     };
   }
 
-  if (isMilestoneDepthVerified(targetMilestoneId)) return { block: false };
+  if (isMilestoneDepthVerified(targetMilestoneId, basePath)) return { block: false };
 
   return {
     block: true,
@@ -458,8 +486,9 @@ export function shouldBlockContextArtifactSave(
   artifactType: string,
   milestoneId: string | null,
   sliceId?: string | null,
+  basePath: string = process.cwd(),
 ): { block: boolean; reason?: string } {
-  return shouldBlockContextArtifactSaveInSnapshot(currentWriteGateSnapshot(), artifactType, milestoneId, sliceId);
+  return shouldBlockContextArtifactSaveInSnapshot(currentWriteGateSnapshot(basePath), artifactType, milestoneId, sliceId);
 }
 
 export function shouldBlockContextArtifactSaveInSnapshot(

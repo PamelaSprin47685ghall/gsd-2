@@ -1,3 +1,5 @@
+// GSD Extension — Plan-slice tool integration tests.
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
@@ -8,6 +10,7 @@ import { openDatabase, closeDatabase, insertMilestone, insertSlice, getSlice, ge
 import { handlePlanSlice } from '../tools/plan-slice.ts';
 import { parsePlan } from '../parsers-legacy.ts';
 import { parseTaskPlanFile } from '../files.ts';
+import { deriveState, invalidateStateCache } from '../state.ts';
 
 function makeTmpBase(): string {
   const base = mkdtempSync(join(tmpdir(), 'gsd-plan-slice-'));
@@ -93,6 +96,63 @@ test('handlePlanSlice writes slice/task planning state and renders plan artifact
     assert.ok(existsSync(taskPlanPath), 'task plan should be rendered to disk');
     const taskPlan = parseTaskPlanFile(readFileSync(taskPlanPath, 'utf-8'));
     assert.deepEqual(taskPlan.frontmatter.skills_used, []);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('handlePlanSlice advances DB-derived state out of planning immediately', async () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+
+  try {
+    seedParentSlice();
+
+    invalidateStateCache();
+    const before = await deriveState(base);
+    assert.equal(before.phase, 'planning');
+    assert.equal(before.progress?.tasks?.total, 0);
+
+    const result = await handlePlanSlice(validParams(), base);
+    assert.ok(!('error' in result), `unexpected error: ${'error' in result ? result.error : ''}`);
+
+    invalidateStateCache();
+    const after = await deriveState(base);
+    assert.notEqual(after.phase, 'planning');
+    assert.equal(after.progress?.tasks?.total, 2);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('handlePlanSlice leaves omitted enrichment fields empty instead of rendering placeholders', async () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+
+  try {
+    seedParentSlice();
+    const { successCriteria, proofLevel, integrationClosure, observabilityImpact, ...params } = validParams();
+    void successCriteria;
+    void proofLevel;
+    void integrationClosure;
+    void observabilityImpact;
+
+    const result = await handlePlanSlice(params, base);
+    assert.ok(!('error' in result), `unexpected error: ${'error' in result ? result.error : ''}`);
+
+    const slice = getSlice('M001', 'S02');
+    assert.ok(slice);
+    assert.equal(slice?.success_criteria, '');
+    assert.equal(slice?.proof_level, '');
+    assert.equal(slice?.integration_closure, '');
+    assert.equal(slice?.observability_impact, '');
+
+    const planPath = join(base, '.gsd', 'milestones', 'M001', 'slices', 'S02', 'S02-PLAN.md');
+    const content = readFileSync(planPath, 'utf-8');
+    assert.doesNotMatch(content, /Not provided/i);
+    assert.doesNotMatch(content, /^## Proof Level$/m);
+    assert.doesNotMatch(content, /^## Integration Closure$/m);
+    assert.match(content, /- Complete the planned slice outcomes\./);
   } finally {
     cleanup(base);
   }

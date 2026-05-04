@@ -155,6 +155,8 @@ Recommended verification order:
 - Use absolute paths for local executables and scripts when possible.
 - For `stdio` servers, prefer setting required environment variables directly in the MCP config instead of relying on an interactive shell profile.
 - GSD and `gsd-mcp-server` both hydrate supported model and tool keys saved in `~/.gsd/agent/auth.json`, so MCP configs can safely reference them through `${ENV_VAR}` placeholders without committing raw credentials.
+- MCP server runtime variables such as `GSD_WORKFLOW_EXECUTORS_MODULE`, `GSD_WORKFLOW_WRITE_GATE_MODULE`, `GSD_WORKFLOW_PROJECT_ROOT`, `GSD_CLI_PATH`, `NODE_OPTIONS`, `NODE_PATH`, `PATH`, `LD_PRELOAD`, and `DYLD_INSERT_LIBRARIES` cannot be set through `secure_env_collect`; configure them explicitly in the operator environment or MCP config.
+- When `secure_env_collect` writes to a local dotenv file, the accepted keys are also hydrated into the current MCP server process. When it pushes to Vercel or Convex, the values are sent to the remote destination only and are not added to `process.env`.
 - If a server is team-shared and safe to commit, `.mcp.json` is usually the better home.
 - If a server depends on machine-local paths, personal services, or local-only secrets, prefer `.gsd/mcp.json`.
 
@@ -166,6 +168,7 @@ Recommended verification order:
 | `GSD_PROJECT_ID` | (auto-hash) | Override the automatic project identity hash. Per-project state goes to `$GSD_HOME/projects/<GSD_PROJECT_ID>/` instead of the computed hash. Useful for CI/CD or sharing state across clones of the same repo. (v2.39) |
 | `GSD_STATE_DIR` | `$GSD_HOME` | Per-project state root. Controls where `projects/<repo-hash>/` directories are created. Takes precedence over `GSD_HOME` for project state. |
 | `GSD_CODING_AGENT_DIR` | `$GSD_HOME/agent` | Agent directory containing managed resources, extensions, and auth. Takes precedence over `GSD_HOME` for agent paths. |
+| `GSD_ALLOW_MARKDOWN_DERIVE_FALLBACK` | (unset) | Set to literal `1` only for tests or explicit recovery workflows that must derive state from rendered markdown when the database is unavailable. Normal runtime treats the database as authoritative and refuses silent markdown fallback. |
 | `GSD_ALLOWED_COMMAND_PREFIXES` | (built-in list) | Comma-separated command prefixes allowed for `!command` value resolution. Overrides `allowedCommandPrefixes` in settings.json. See [Custom Models — Command Allowlist](custom-models.md#command-allowlist). |
 | `GSD_FETCH_ALLOWED_URLS` | (none) | Comma-separated hostnames exempted from `fetch_page` URL blocking. Overrides `fetchAllowedUrls` in settings.json. See [URL Blocking](#url-blocking-fetch_page). |
 | `PI_TOKEN_TELEMETRY` | (unset) | Set to literal `1` to emit opt-in per-call token telemetry as JSONL on stderr. Other values are ignored. |

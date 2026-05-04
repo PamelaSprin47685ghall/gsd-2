@@ -64,6 +64,38 @@ async function applyDisabledModelProviderPolicy(ctx: ExtensionContext): Promise<
   }
 }
 
+async function writeContextModeCompactionSnapshot(basePath: string): Promise<void> {
+  try {
+    const { loadEffectiveGSDPreferences } = await import("../preferences.js");
+    const { isContextModeEnabled } = await import("../preferences-types.js");
+    const prefs = loadEffectiveGSDPreferences(basePath);
+    if (!isContextModeEnabled(prefs?.preferences)) return;
+
+    const { writeCompactionSnapshot } = await import("../compaction-snapshot.js");
+    const { ensureDbOpen } = await import("./dynamic-tools.js");
+    await ensureDbOpen(basePath);
+
+    let activeContext: string | null = null;
+    try {
+      const state = await deriveGsdState(basePath);
+      if (state.activeMilestone && state.activeSlice && state.activeTask) {
+        activeContext =
+          `Active: ${state.activeMilestone.id} / ${state.activeSlice.id} / ${state.activeTask.id}` +
+          (state.activeTask.title ? ` - ${state.activeTask.title}` : "");
+      }
+    } catch {
+      /* non-fatal */
+    }
+
+    writeCompactionSnapshot(basePath, { activeContext });
+  } catch (err) {
+    safetyLogWarning(
+      "context-mode",
+      `failed to write compaction snapshot: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 export function registerHooks(
   pi: ExtensionAPI,
   ecosystemHandlers: GSDEcosystemBeforeAgentStartHandler[],
@@ -76,7 +108,7 @@ export function registerHooks(
       const { initHealthWidget } = await import("../health-widget.js");
       initHealthWidget(ctx);
     }
-    resetWriteGateState();
+    resetWriteGateState(process.cwd());
     resetToolCallLoopGuard();
     approvalQuestionAbortInFlight = false;
     await resetAskUserQuestionsTurnCache();
@@ -126,10 +158,10 @@ export function registerHooks(
   pi.on("session_switch", async (_event, ctx) => {
     initNotificationStore(process.cwd());
     installNotifyInterceptor(ctx);
-    resetWriteGateState();
+    resetWriteGateState(process.cwd());
     resetToolCallLoopGuard();
     await resetAskUserQuestionsTurnCache();
-    clearDiscussionFlowState();
+    clearDiscussionFlowState(process.cwd());
     await syncServiceTierStatus(ctx);
     await applyDisabledModelProviderPolicy(ctx);
     // Skip MCP auto-prep when running inside an auto-worktree. The worktree
@@ -155,12 +187,13 @@ export function registerHooks(
     const { getEcosystemReadyPromise } = await import("../ecosystem/loader.js");
     await getEcosystemReadyPromise();
 
-    const pendingApprovalGate = getPendingGate();
+    const beforeAgentBasePath = process.cwd();
+    const pendingApprovalGate = getPendingGate(beforeAgentBasePath);
     if (pendingApprovalGate && isExplicitApprovalResponse(event.prompt, pendingApprovalGate)) {
-      markApprovalGateVerified(pendingApprovalGate);
+      markApprovalGateVerified(pendingApprovalGate, beforeAgentBasePath);
       const milestoneId = extractDepthVerificationMilestoneId(pendingApprovalGate);
-      if (milestoneId) markDepthVerified(milestoneId);
-      clearPendingGate();
+      if (milestoneId) markDepthVerified(milestoneId, beforeAgentBasePath);
+      clearPendingGate(beforeAgentBasePath);
     }
 
     // GSD's own context injection (existing behavior — unchanged).
@@ -228,15 +261,19 @@ export function registerHooks(
   });
 
   pi.on("session_before_compact", async () => {
+    const basePath = process.cwd();
+    // Context Mode is default-on. Write the resumable snapshot before any
+    // active-auto cancel return so auto sessions still leave re-entry context.
+    await writeContextModeCompactionSnapshot(basePath);
+
     // Only cancel compaction while auto-mode is actively running.
     // Paused auto-mode should allow compaction — the user may be doing
     // interactive work (#3165).
     if (isAutoActive()) {
       return { cancel: true };
     }
-    const basePath = process.cwd();
     const { ensureDbOpen } = await import("./dynamic-tools.js");
-    await ensureDbOpen();
+    await ensureDbOpen(basePath);
     const state = await deriveGsdState(basePath);
     if (!state.activeMilestone || !state.activeSlice) return;
     // Write checkpoint for ALL phases, not just "executing" — discuss, research,
@@ -281,42 +318,6 @@ export function registerHooks(
     }));
   });
 
-  // Context-mode snapshot: write .gsd/last-snapshot.md before compaction so
-  // agents can call gsd_resume (or Read the file) to re-orient. Opt-in via
-  // preferences.context_mode.enabled. Runs after the auto-cancel handler
-  // above — if that one returned cancel:true, pi still fires us but the
-  // compaction won't actually happen; the snapshot is still useful then,
-  // since auto may pause and resume later.
-  pi.on("session_before_compact", async () => {
-    try {
-      const { loadEffectiveGSDPreferences } = await import("../preferences.js");
-      const { isContextModeEnabled } = await import("../preferences-types.js");
-      const prefs = loadEffectiveGSDPreferences();
-      if (!isContextModeEnabled(prefs?.preferences)) return;
-      const { writeCompactionSnapshot } = await import("../compaction-snapshot.js");
-      const { ensureDbOpen } = await import("./dynamic-tools.js");
-      await ensureDbOpen();
-      const basePath = process.cwd();
-      let activeContext: string | null = null;
-      try {
-        const state = await deriveGsdState(basePath);
-        if (state.activeMilestone && state.activeSlice && state.activeTask) {
-          activeContext =
-            `Active: ${state.activeMilestone.id} / ${state.activeSlice.id} / ${state.activeTask.id}` +
-            (state.activeTask.title ? ` — ${state.activeTask.title}` : "");
-        }
-      } catch {
-        /* non-fatal */
-      }
-      writeCompactionSnapshot(basePath, { activeContext });
-    } catch (err) {
-      safetyLogWarning(
-        "context-mode",
-        `failed to write compaction snapshot: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  });
-
   pi.on("message_update", async (event, ctx: ExtensionContext) => {
     if (approvalQuestionAbortInFlight) return;
 
@@ -346,7 +347,7 @@ export function registerHooks(
     if (!shouldPauseForUserApprovalQuestion(unitType, [event.message])) return;
 
     const gateId = approvalGateIdForUnit(unitType, unitId);
-    if (gateId) setPendingGate(gateId);
+    if (gateId) setPendingGate(gateId, process.cwd());
 
     approvalQuestionAbortInFlight = true;
     ctx.ui.notify(
@@ -393,27 +394,29 @@ export function registerHooks(
       const questions: any[] = (event.input as any)?.questions ?? [];
       const questionId = questions.find((question) => typeof question?.id === "string" && isGateQuestionId(question.id))?.id;
       if (typeof questionId === "string") {
-        setPendingGate(questionId);
+        setPendingGate(questionId, discussionBasePath);
       }
     }
 
     // ── Discussion gate enforcement: block tool calls while gate is pending ──
     // If ask_user_questions was called with a gate ID but hasn't been confirmed,
     // block all non-read-only tool calls to prevent the model from skipping gates.
-    if (getPendingGate()) {
+    if (getPendingGate(discussionBasePath)) {
       const milestoneId = await getDiscussionMilestoneIdFor(discussionBasePath);
       if (isToolCallEventType("bash", event)) {
         const bashGuard = shouldBlockPendingGateBash(
           event.input.command,
           milestoneId,
-          isQueuePhaseActive(),
+          isQueuePhaseActive(discussionBasePath),
+          discussionBasePath,
         );
         if (bashGuard.block) return bashGuard;
       } else {
         const gateGuard = shouldBlockPendingGate(
           toolName,
           milestoneId,
-          isQueuePhaseActive(),
+          isQueuePhaseActive(discussionBasePath),
+          discussionBasePath,
         );
         if (gateGuard.block) return gateGuard;
       }
@@ -423,7 +426,7 @@ export function registerHooks(
     // When /gsd queue is active, the agent should only create milestones,
     // not execute work. Block write/edit to non-.gsd/ paths and bash commands
     // that would modify files.
-    if (isQueuePhaseActive()) {
+    if (isQueuePhaseActive(discussionBasePath)) {
       let queueInput = "";
       if (isToolCallEventType("write", event)) {
         queueInput = event.input.path;
@@ -497,7 +500,8 @@ export function registerHooks(
       event.toolName,
       event.input.path,
       await getDiscussionMilestoneIdFor(discussionBasePath),
-      isQueuePhaseActive(),
+      isQueuePhaseActive(discussionBasePath),
+      discussionBasePath,
     );
     if (result.block) return result;
   });
@@ -555,8 +559,9 @@ export function registerHooks(
     }
     const toolName = canonicalToolName(event.toolName);
     if (toolName !== "ask_user_questions") return;
-    const milestoneId = await getDiscussionMilestoneIdFor(process.cwd());
-    const queueActive = isQueuePhaseActive();
+    const basePath = process.cwd();
+    const milestoneId = await getDiscussionMilestoneIdFor(basePath);
+    const queueActive = isQueuePhaseActive(basePath);
 
     const details = event.details as any;
 
@@ -566,11 +571,16 @@ export function registerHooks(
     // If the user responded at all (even "needs adjustment"), clear the pending gate
     // because the user engaged — the prompt handles the re-ask-after-adjustment flow.
     const questions: any[] = (event.input as any)?.questions ?? [];
-    const currentPendingGate = getPendingGate();
+    const currentPendingGate = getPendingGate(basePath);
     if (currentPendingGate) {
       if (details?.cancelled || !details?.response) {
-        // Gate stays pending. Return a hard instruction as the tool result so
-        // the model cannot reinterpret a cancelled prompt as prior approval.
+        // Gate stays pending. Direct the agent to the most reliable recovery
+        // path — re-calling ask_user_questions with the same gate id — without
+        // misrepresenting the plain-text path. The plain-text path also works
+        // (isExplicitApprovalResponse on the next before_agent_start clears
+        // the gate when the user replies with an approval keyword), but the
+        // structured re-ask is more deterministic and gives the user a clear UI.
+        resetToolCallLoopGuard();
         return {
           content: [{
             type: "text" as const,
@@ -578,8 +588,8 @@ export function registerHooks(
               `HARD BLOCK: approval gate "${currentPendingGate}" is still pending.`,
               "No user response was received for the confirmation question.",
               "Do not infer approval from earlier or prior messages.",
-              "Do not proceed, write files, save artifacts, or call more tools.",
-              "Ask the user to confirm in plain chat, then stop and wait for their next message.",
+              "Do not proceed, write files, save artifacts, or call other tools.",
+              `Re-call ask_user_questions with the same gate question id ("${currentPendingGate}") and wait for the user's response.`,
             ].join(" "),
           }],
         };
@@ -588,10 +598,10 @@ export function registerHooks(
         if (pendingQuestion) {
           const answer = details.response?.answers?.[currentPendingGate];
           if (isDepthConfirmationAnswer(answer?.selected, pendingQuestion.options)) {
-            markApprovalGateVerified(currentPendingGate);
+            markApprovalGateVerified(currentPendingGate, basePath);
             const milestoneIdFromGate = extractDepthVerificationMilestoneId(currentPendingGate);
-            if (milestoneIdFromGate) markDepthVerified(milestoneIdFromGate);
-            clearPendingGate();
+            if (milestoneIdFromGate) markDepthVerified(milestoneIdFromGate, basePath);
+            clearPendingGate(basePath);
           }
         }
       }
@@ -607,9 +617,9 @@ export function registerHooks(
         const inferredMilestoneId = extractDepthVerificationMilestoneId(question.id) ?? milestoneId;
         if (isDepthConfirmationAnswer(answer?.selected, question.options)) {
           if (currentPendingGate && question.id !== currentPendingGate) break;
-          markApprovalGateVerified(question.id);
-          markDepthVerified(inferredMilestoneId);
-          clearPendingGate();
+          markApprovalGateVerified(question.id, basePath);
+          markDepthVerified(inferredMilestoneId, basePath);
+          clearPendingGate(basePath);
         }
         break;
       }
@@ -617,8 +627,6 @@ export function registerHooks(
 
     if (!milestoneId && !queueActive) return;
     if (!milestoneId) return;
-
-    const basePath = process.cwd();
     const milestoneDir = resolveMilestonePath(basePath, milestoneId);
     if (!milestoneDir) return;
 

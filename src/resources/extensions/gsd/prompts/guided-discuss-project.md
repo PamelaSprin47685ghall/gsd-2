@@ -26,6 +26,18 @@ Ask the user a single freeform question in plain text, not structured: **"What d
 
 Wait for their response. This grounds every follow-up in their own terminology.
 
+### Classify project shape
+
+After the opening answer, classify the project as **`simple`** or **`complex`** before continuing. Print the verdict in chat as one line: `Project shape: simple` or `Project shape: complex` followed by a one-line rationale.
+
+**`simple`** — most of these apply: single primary user (the user themselves or one immediate team), no external integrations beyond well-known SDKs/libs, greenfield or self-contained, scope describable in 1–2 sentences without ambiguity, no compliance/regulatory needs, ≤5 distinct capabilities.
+
+**`complex`** — any of these apply: multi-user with roles/permissions, non-trivial brownfield codebase, external integrations with auth/data exchange, compliance/security/regulated domain (PII, payments, healthcare), >5 capabilities or unclear scope, cross-team/cross-org coordination, novel domain where assumptions need validation.
+
+**Default to `complex` when uncertain.** The user can override the verdict in plain text; if they do, accept it and proceed.
+
+The verdict drives the rest of this stage and gets persisted to PROJECT.md → `## Project Shape`. Downstream stages (`discuss-requirements`, `discuss-milestone`, `discuss-slice`) read it from there.
+
 ### Before deeper rounds
 
 Do a lightweight targeted investigation so your questions are grounded in reality:
@@ -50,9 +62,11 @@ Ask **1–3 questions per round**. Each round targets one of:
 
 **Never fabricate or simulate user input.** Never generate fake transcript markers like `[User]`, `[Human]`, or `User:`. Ask one question round, then wait for the user's actual response before continuing.
 
-**Plain-text default:** Project discovery is open-ended. Ask question rounds in plain text unless you are presenting 2–3 concrete alternatives with clear tradeoffs.
+**Cadence is shape-dependent:**
+- **`simple`** — favor 1–2 plain-text rounds. Skip `ask_user_questions` unless you are presenting concrete alternatives. Get to the depth checklist fast.
+- **`complex`** — full investigation, multiple rounds, structured questions when meaningful alternatives exist.
 
-**If `{{structuredQuestionsAvailable}}` is `true` and you use `ask_user_questions`:** ask 1–3 questions per call. Every question object MUST include a stable lowercase `id`. Keep option labels short (3–5 words). Always include a freeform "Other / let me explain" option. Wait for each tool result before asking the next round.
+**If `{{structuredQuestionsAvailable}}` is `true` and you use `ask_user_questions`:** ask 1–3 questions per call. Every question object MUST include a stable lowercase `id`. Keep option labels short (3–5 words). In **`complex`** mode, each multi-choice question MUST present **3 or 4 concrete, researched options** plus a final **"Other — let me discuss"** option; options must be grounded in your investigation (codebase signals, library docs, prior `.gsd/` artifacts), not generic placeholders. In **`simple`** mode, 2 options is fine. Binary depth-check / wrap-up gates are exempt from the 3-or-4 rule. Wait for each tool result before asking the next round.
 
 **If `{{structuredQuestionsAvailable}}` is `false`:** ask questions in plain text. Keep each round to 1–3 focused questions.
 
@@ -116,7 +130,7 @@ If they clarify, absorb the correction and re-verify.
 
 The depth verification is the only required confirmation gate. Do not add a second "ready to proceed?" gate after it.
 
-**CRITICAL — Non-bypassable gate:** The system mechanically blocks PROJECT.md writes until the user selects the "(Recommended)" option (structured path) or explicitly confirms (plain-text path). If the user declines, cancels, does not respond, or the tool fails, you MUST re-ask — never rationalize past the block.
+**CRITICAL — Confirmation gate:** Do not write final PROJECT.md until the user selects the "(Recommended)" option (structured path) or explicitly confirms (plain-text path). If the user declines, cancels, does not respond, or the tool fails, you MUST re-ask — never rationalize past the block.
 
 ---
 
@@ -126,8 +140,9 @@ Once the user confirms depth:
 
 1. Use the **Project** output template (inlined above).
 2. Call `gsd_summary_save` with `artifact_type: "PROJECT"` and the full project markdown as `content`; omit `milestone_id`. The tool writes `.gsd/PROJECT.md` to disk and persists to DB. Preserve the user's exact terminology, emphasis, and framing.
-3. The `## Capability Contract` section MUST reference `.gsd/REQUIREMENTS.md` — that file does not yet exist; the next stage (`discuss-requirements`) will produce it.
-4. The `## Milestone Sequence` MUST list at least M001 with title and one-liner. Subsequent milestones may be listed as known intents; they will be elaborated in their own discuss-milestone stages.
-5. Do NOT use `artifact_type: "CONTEXT"` and do NOT pass `milestone_id: "PROJECT"`; that creates a fake milestone named PROJECT.
-6. {{commitInstruction}}
-7. Say exactly: `"Project context written."` — nothing else.
+3. The `## Project Shape` section MUST contain `**Complexity:** simple` or `**Complexity:** complex` (matching the verdict you announced) plus a one-line `**Why:**` rationale. Downstream stages read this line.
+4. The `## Capability Contract` section MUST reference `.gsd/REQUIREMENTS.md` — that file does not yet exist; the next stage (`discuss-requirements`) will produce it.
+5. The `## Milestone Sequence` MUST list at least M001 with title and one-liner. Subsequent milestones may be listed as known intents; they will be elaborated in their own discuss-milestone stages.
+6. Do NOT use `artifact_type: "CONTEXT"` and do NOT pass `milestone_id: "PROJECT"`; that creates a fake milestone named PROJECT.
+7. {{commitInstruction}}
+8. Say exactly: `"Project context written."` — nothing else.

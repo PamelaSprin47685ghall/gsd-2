@@ -10,11 +10,18 @@ import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@g
 import type { GSDState } from "./types.js";
 import { showNextAction } from "../shared/tui.js";
 import { loadFile, saveFile } from "./files.js";
-import { isDbAvailable, getMilestoneSlices } from "./gsd-db.js";
+import { isDbAvailable, getMilestone, getMilestoneSlices } from "./gsd-db.js";
 import { parseRoadmapSlices } from "./roadmap-slices.js";
 import { loadPrompt, inlineTemplate } from "./prompt-loader.js";
-import { buildDiscussMilestonePrompt, buildSkillActivationBlock } from "./auto-prompts.js";
-import { deriveState } from "./state.js";
+import {
+  buildCompleteSlicePrompt,
+  buildDiscussMilestonePrompt,
+  buildExecuteTaskPrompt,
+  buildPlanMilestonePrompt,
+  buildPlanSlicePrompt,
+  buildSkillActivationBlock,
+} from "./auto-prompts.js";
+import { deriveState, isGhostMilestone } from "./state.js";
 import { invalidateAllCaches } from "./cache.js";
 import { startAutoDetached } from "./auto.js";
 import { clearLock } from "./crash-recovery.js";
@@ -29,7 +36,7 @@ import { gsdHome } from "./gsd-home.js";
 import {
   gsdRoot, milestonesDir, resolveMilestoneFile, resolveMilestonePath,
   resolveSliceFile, resolveSlicePath, resolveGsdRootFile, relGsdRootFile,
-  relMilestoneFile, relSliceFile,
+  relMilestoneFile, relSliceFile, clearPathCache,
 } from "./paths.js";
 import { join } from "node:path";
 import { readFileSync, existsSync, mkdirSync, readdirSync, rmSync, unlinkSync } from "node:fs";
@@ -62,7 +69,8 @@ import {
   formatPriorContextBrief,
 } from "./preparation.js";
 import { verifyExpectedArtifact } from "./auto-recovery.js";
-import { isAwaitingUserInput } from "./auto-post-unit.js";
+import { createWorkspace, scopeMilestone, type MilestoneScope } from "./workspace.js";
+import { getPendingGate, extractDepthVerificationMilestoneId } from "./bootstrap/write-gate.js";
 
 // ─── Re-exports (preserve public API for existing importers) ────────────────
 export {
@@ -76,6 +84,48 @@ export {
   buildExistingMilestonesContext,
 } from "./guided-flow-queue.js";
 import { logWarning } from "./workflow-logger.js";
+import { deleteRuntimeKv } from "./db/runtime-kv.js";
+import { PAUSED_SESSION_KV_KEY } from "./interrupted-session.js";
+
+// ─── Scope-based validator wrappers ──────────────────────────────────────────
+// These thin wrappers accept a MilestoneScope so callers that already hold a
+// pinned scope never have to re-derive (basePath, milestoneId) separately.
+// The underlying implementations in auto-recovery.ts / auto-artifact-paths.ts /
+// state.ts are unchanged — only the call surface in guided-flow.ts is migrated.
+
+/**
+ * Scope-based overload of verifyExpectedArtifact.
+ * Uses scope.workspace.projectRoot as the authoritative base path, making
+ * the check immune to cwd-drift and worktree-path divergence.
+ */
+export function verifyExpectedArtifactForScope(
+  scope: MilestoneScope,
+  unitType: string,
+  unitId: string,
+): boolean {
+  return verifyExpectedArtifact(unitType, unitId, scope.workspace.projectRoot);
+}
+
+/**
+ * Scope-based overload of resolveExpectedArtifactPath.
+ * Returns the canonical absolute path (or null) using the scope's projectRoot.
+ */
+export function resolveExpectedArtifactPathForScope(
+  scope: MilestoneScope,
+  unitType: string,
+  unitId: string,
+): string | null {
+  return resolveExpectedArtifactPath(unitType, unitId, scope.workspace.projectRoot);
+}
+
+/**
+ * Scope-based overload of isGhostMilestone.
+ * Binds basePath and milestoneId from the scope, ensuring path resolution
+ * uses the canonical project root regardless of the cwd at call time.
+ */
+export function isGhostMilestoneByScope(scope: MilestoneScope): boolean {
+  return isGhostMilestone(scope.workspace.projectRoot, scope.milestoneId);
+}
 
 function needsPlanV2Gate(state: GSDState): boolean {
   return state.phase === "executing"
@@ -129,6 +179,13 @@ interface PendingAutoStartEntry {
   // #4573: counter for how many times the LLM emitted the ready phrase
   // without writing the required artifacts. Cleared on entry delete/recreate.
   readyRejectCount?: number;
+  // C1: scope is pinned at reservation time so path resolution is immune to
+  // cwd-drift between discuss and checkAutoStartAfterDiscuss.
+  // TODO(C3): basePath becomes redundant once all consumers migrate to scope.
+  scope: MilestoneScope;
+  // H1: retry counter for Gate 1b plan-blocked recovery. Capped at
+  // MAX_PLAN_BLOCKED_RECOVERIES to prevent infinite recovery loops (#5012).
+  planBlockedRecoveryCount: number;
 }
 
 interface PendingDeepProjectSetupEntry {
@@ -145,6 +202,11 @@ interface PendingDeepProjectSetupEntry {
 // #4573: cap for how many times we nudge the LLM after a premature ready
 // phrase before giving up and asking the user to re-run /gsd.
 const MAX_READY_REJECTS = 2;
+
+// H1 (#5012): cap for Gate 1b plan-blocked recovery hints. After this many
+// consecutive recovery attempts the loop is stopped and the user is directed
+// to investigate manually.
+const MAX_PLAN_BLOCKED_RECOVERIES = 3;
 
 // #4573: matches the canonical ready phrase the discuss prompt asks the LLM
 // to emit. Accepts any M-prefixed milestone ID (three digits + optional
@@ -181,9 +243,9 @@ This stage is running inside the foreground \`/gsd new-project --deep\` intervie
 /**
  * Backward-compat bridge: returns a mutable reference to the entry matching
  * basePath, or the sole entry when only one session exists.
- * Internal use only — external code should use the Map directly.
+ * Exported for testing — internal use only in production code.
  */
-function _getPendingAutoStart(basePath?: string): PendingAutoStartEntry | null {
+export function _getPendingAutoStart(basePath?: string): PendingAutoStartEntry | null {
   if (basePath) return pendingAutoStartMap.get(basePath) ?? null;
   if (pendingAutoStartMap.size === 1) return pendingAutoStartMap.values().next().value!;
   return null;
@@ -227,7 +289,9 @@ function clearEmptyLegacyDeepSetupPseudoMilestones(basePath: string, entries: st
  * Exported for testing (#2985).
  */
 export function setPendingAutoStart(basePath: string, entry: { basePath: string; milestoneId: string; ctx?: ExtensionCommandContext; pi?: ExtensionAPI; step?: boolean; createdAt?: number }): void {
-  pendingAutoStartMap.set(basePath, { createdAt: Date.now(), ...entry } as PendingAutoStartEntry);
+  const ws = createWorkspace(entry.basePath);
+  const scope = scopeMilestone(ws, entry.milestoneId);
+  pendingAutoStartMap.set(basePath, { createdAt: Date.now(), planBlockedRecoveryCount: 0, ...entry, scope } as PendingAutoStartEntry);
 }
 
 /**
@@ -329,7 +393,7 @@ export async function startDeepProjectSetupForeground(
 }
 
 export async function checkDeepProjectSetupAfterTurn(
-  event: { messages: any[] },
+  _event: { messages: any[] },
   ctx?: ExtensionContext,
   basePath?: string,
 ): Promise<boolean> {
@@ -337,11 +401,23 @@ export async function checkDeepProjectSetupAfterTurn(
   if (!entry) return false;
 
   if (entry.currentUnitType && entry.currentUnitId) {
+    // TODO(C-future): PendingDeepProjectSetupEntry does not carry a MilestoneScope
+    // because deep-project-setup units span non-milestone unit types (discuss-project,
+    // discuss-requirements, etc.).  Migrate to verifyExpectedArtifactForScope once
+    // PendingDeepProjectSetupEntry is extended with a scope field.
     const artifactReady = verifyExpectedArtifact(entry.currentUnitType, entry.currentUnitId, entry.basePath);
     if (!artifactReady) {
-      if (isAwaitingUserInput(event.messages)) return false;
       return false;
     }
+  }
+
+  // R2: a depth-verification gate is still pending — the LLM emitted the
+  // confirmation question (via ask_user_questions or plain chat) but the user
+  // has not approved yet. Returning false keeps the entry in the
+  // pendingDeepProjectSetupMap so the next user message can resume.
+  const pendingGateId = getPendingGate(entry.basePath);
+  if (pendingGateId) {
+    return false;
   }
 
   return dispatchNextDeepProjectSetupStage(entry);
@@ -421,17 +497,96 @@ export function checkAutoStartAfterDiscuss(): boolean {
 
   // Gate 1: Primary milestone must have CONTEXT.md or ROADMAP.md
   // The "discuss" path creates CONTEXT.md; the "plan" path creates ROADMAP.md.
-  const contextFile = resolveMilestoneFile(basePath, milestoneId, "CONTEXT");
-  const roadmapFile = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
+  // Use pinned scope (immune to cwd-drift) for existence checks.
+  const contextFilePath = entry.scope.contextFile();
+  const roadmapFilePath = entry.scope.roadmapFile();
+  const contextFile = existsSync(contextFilePath) ? contextFilePath : null;
+  const roadmapFile = existsSync(roadmapFilePath) ? roadmapFilePath : null;
   if (!contextFile && !roadmapFile) return false; // neither artifact yet — keep waiting
+
+  // Gate 1a: a depth-verification gate is still pending for THIS milestone — the
+  // LLM emitted the confirmation question (via ask_user_questions or plain chat)
+  // but the user has not answered yet. Advancing now would skip the gate and
+  // race ahead with unverified context.
+  const basePathForGate = entry.scope.workspace.projectRoot;
+  const pendingGateId = getPendingGate(basePathForGate);
+  if (pendingGateId) {
+    const pendingMilestoneId = extractDepthVerificationMilestoneId(pendingGateId);
+    // Block advancement if the gate is for THIS milestone, OR if it's a
+    // project/requirements gate (no milestone id encoded) for the deep setup flow.
+    const isProjectGate =
+      pendingGateId === "depth_verification_project_confirm" ||
+      pendingGateId === "depth_verification_requirements_confirm" ||
+      pendingGateId === "depth_verification_research_decision_confirm";
+    if (pendingMilestoneId === milestoneId || isProjectGate) {
+      return false;
+    }
+  }
+
+  // Gate 1b: Discriminate plan-blocked from discuss-incomplete when the DB row is queued.
+  // If the DB is available and the row is still "queued" but CONTEXT.md already exists on
+  // disk, the discuss phase completed but gsd_plan_milestone was hard-blocked by the
+  // depth-verification gate.  Emit a recovery hint so the next agent turn can retry
+  // gsd_plan_milestone, then return false (keep blocking auto-start).
+  // If CONTEXT.md does not exist (discuss-incomplete), Gate 1 already blocked above.
+  if (isDbAvailable()) {
+    const dbRow = getMilestone(milestoneId);
+    if (dbRow?.status === "queued" && contextFile) {
+      if (entry.planBlockedRecoveryCount >= MAX_PLAN_BLOCKED_RECOVERIES) {
+        // H1: recovery loop cap reached — stop triggering new turns, escalate to user.
+        logWarning(
+          "guided",
+          `Gate 1b: milestone ${milestoneId} plan-blocked recovery limit reached ` +
+          `(${entry.planBlockedRecoveryCount}/${MAX_PLAN_BLOCKED_RECOVERIES}); escalating to user`,
+        );
+        ctx.ui.notify(
+          `Milestone ${milestoneId} plan_milestone has been blocked ${entry.planBlockedRecoveryCount} times. ` +
+          `Re-run /gsd to reset the recovery counter, or run /gsd-debug to diagnose without resetting.`,
+          "error",
+        );
+        return false;
+      }
+      logWarning(
+        "guided",
+        `Gate 1b: milestone ${milestoneId} queued with CONTEXT.md present — ` +
+        `plan_milestone was blocked; emitting recovery hint ` +
+        `(attempt ${entry.planBlockedRecoveryCount + 1}/${MAX_PLAN_BLOCKED_RECOVERIES})`,
+      );
+      ctx.ui.notify(
+        `Milestone ${milestoneId}: context file exists but milestone is still queued. ` +
+        `Retrying gsd_plan_milestone to complete the blocked planning step.`,
+        "warning",
+      );
+      try {
+        pi.sendMessage(
+          {
+            customType: "gsd-plan-milestone-blocked-recovery",
+            content:
+              `Milestone ${milestoneId} has ${contextFile} on disk but its DB row is still ` +
+              `"queued". The gsd_plan_milestone tool was previously blocked by the ` +
+              `depth-verification gate. Call gsd_plan_milestone now to complete the ` +
+              `planning phase.`,
+            display: false,
+          },
+          { triggerTurn: true },
+        );
+        // Increment only after a successful dispatch so transient sendMessage
+        // failures do not consume recovery budget.
+        entry.planBlockedRecoveryCount += 1;
+      } catch (e) {
+        logWarning("guided", `Gate 1b recovery sendMessage failed: ${(e as Error).message}`);
+      }
+      return false;
+    }
+  }
 
   // Gate 2: STATE.md must exist — written as the last step in the discuss
   // output phase. This prevents auto-start from firing during Phase 3
   // (sequential readiness gates for remaining milestones) in multi-milestone
   // discussions, where M001-CONTEXT.md exists but M002/M003 haven't been
   // processed yet.
-  const stateFile = resolveGsdRootFile(basePath, "STATE");
-  if (!stateFile) return false; // discussion not finalized yet
+  const stateFilePath = entry.scope.stateFile();
+  if (!existsSync(stateFilePath)) return false; // discussion not finalized yet
 
   // Gate 3: Multi-milestone completeness warning
   // Parse PROJECT.md for milestone sequence, warn if any are missing context.
@@ -464,7 +619,7 @@ export function checkAutoStartAfterDiscuss(): boolean {
   // The LLM writes DISCUSSION-MANIFEST.json after each Phase 3 gate decision.
   // When it exists, validate it before auto-starting. Project history alone is
   // not a reliable signal for the current discussion mode.
-  const manifestPath = join(gsdRoot(basePath), "DISCUSSION-MANIFEST.json");
+  const manifestPath = join(entry.scope.workspace.contract.projectGsd, "DISCUSSION-MANIFEST.json");
   if (existsSync(manifestPath)) {
     try {
       const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
@@ -500,6 +655,24 @@ export function checkAutoStartAfterDiscuss(): boolean {
   // Cleanup: remove discussion manifest after auto-start (only needed during discussion)
   if (existsSync(manifestPath)) {
     try { unlinkSync(manifestPath); } catch (e) { logWarning("guided", `manifest unlink failed: ${(e as Error).message}`); }
+  }
+
+  // R3b: belt-and-suspenders for silent registration failure. The discuss flow
+  // finished and STATE.md exists, but the milestone may never have landed in
+  // the DB. Without this guard, the user sees "Milestone M001 ready." and then
+  // /gsd reports "No Active Milestone".
+  if (isDbAvailable()) {
+    const milestoneRow = getMilestone(milestoneId);
+    if (!milestoneRow) {
+      ctx.ui.notify(
+        `Milestone ${milestoneId}: discuss artifacts on disk but no DB row exists. ` +
+        `PROJECT.md may have failed to register milestones. ` +
+        `Re-save PROJECT.md with canonical "- [ ] M001: Title — One-liner" lines, ` +
+        `then re-run /gsd to recover.`,
+        "error",
+      );
+      return false;
+    }
   }
 
   pendingAutoStartMap.delete(basePath);
@@ -555,13 +728,15 @@ function hasToolUse(msg: any): boolean {
 /**
  * #4573 — Detect and recover from the "ready phrase without files" failure mode.
  *
- * When the LLM emits "Milestone {{id}} ready." but has not written CONTEXT.md
- * or ROADMAP.md, `checkAutoStartAfterDiscuss()` silently returns false and the
- * next /gsd invocation loops into the "All milestones complete" warning.
+ * When the LLM emits "Milestone {{id}} ready." but has not written the
+ * milestone CONTEXT/ROADMAP artifacts, `checkAutoStartAfterDiscuss()` silently
+ * returns false and the next /gsd invocation loops into the "All milestones
+ * complete" warning.
  *
  * This function, called from `handleAgentEnd` after `checkAutoStartAfterDiscuss`
  * returns false, pattern-matches the ready phrase on the last assistant message.
- * If it fired AND neither CONTEXT.md nor ROADMAP.md exists, it:
+ * If it fired AND neither the canonical M###-CONTEXT.md/M###-ROADMAP.md nor
+ * legacy CONTEXT.md/ROADMAP.md files exist, it:
  *   1. Notifies the user that the signal was rejected.
  *   2. Injects a system message via `pi.sendMessage(..., {triggerTurn:true})`
  *      telling the LLM the signal was premature and to emit the writes now.
@@ -581,11 +756,38 @@ export function maybeHandleReadyPhraseWithoutFiles(event: { messages: any[] }): 
   const text = extractAssistantText(lastMsg);
   if (!READY_PHRASE_RE.test(text)) return false;
 
+  // Bust paths.ts cached dir listings before checking for fresh writes. The
+  // LLM's Write tool calls do not invalidate paths.ts caches, so a stale
+  // listing taken before the milestone dir or its CONTEXT/ROADMAP files
+  // existed would falsely report the artifacts as missing and trigger the
+  // 3-strike "ready without files" abort even though the writes succeeded.
+  clearPathCache();
+
   // Gate: artifacts must still be missing — if they exist, the happy path
   // already fired and we have nothing to do.
   const contextFile = resolveMilestoneFile(basePath, milestoneId, "CONTEXT");
   const roadmapFile = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
   if (contextFile || roadmapFile) return false;
+
+  // Diagnostic: when the cached resolver reports both files missing, also probe
+  // the canonical paths with uncached existsSync so we can tell whether the
+  // recovery is firing on real-missing files or a path-resolution miss
+  // (basePath/symlink mismatch, stale cache despite agent-end-recovery flush,
+  // legacy descriptor dir not matching, etc.).
+  try {
+    const mDir = resolveMilestonePath(basePath, milestoneId);
+    const canonicalCtx = mDir ? join(mDir, `${milestoneId}-CONTEXT.md`) : null;
+    const canonicalRoadmap = mDir ? join(mDir, `${milestoneId}-ROADMAP.md`) : null;
+    logWarning(
+      "guided",
+      `ready-phrase-reject diagnostic mid=${milestoneId} basePath=${basePath} ` +
+      `mDir=${mDir ?? "null"} ` +
+      `canonical-ctx=${canonicalCtx ?? "null"} ctx-exists=${canonicalCtx ? existsSync(canonicalCtx) : "n/a"} ` +
+      `canonical-roadmap=${canonicalRoadmap ?? "null"} roadmap-exists=${canonicalRoadmap ? existsSync(canonicalRoadmap) : "n/a"}`,
+    );
+  } catch (e) {
+    logWarning("guided", `ready-phrase-reject diagnostic failed: ${(e as Error).message}`);
+  }
 
   entry.readyRejectCount = (entry.readyRejectCount ?? 0) + 1;
 
@@ -601,15 +803,16 @@ export function maybeHandleReadyPhraseWithoutFiles(event: { messages: any[] }): 
     return true;
   }
 
+  const contextRel = relMilestoneFile(basePath, milestoneId, "CONTEXT");
+  const roadmapRel = relMilestoneFile(basePath, milestoneId, "ROADMAP");
   ctx.ui.notify(
-    `Milestone ${milestoneId}: "ready" signal rejected — CONTEXT.md and ROADMAP.md are missing. Asking the LLM to complete the writes.`,
+    `Milestone ${milestoneId}: "ready" signal rejected — ${contextRel} and ${roadmapRel} are missing. Asking the LLM to complete the writes.`,
     "warning",
   );
 
   const nudge =
     `You emitted "Milestone ${milestoneId} ready." but neither ` +
-    `.gsd/milestones/${milestoneId}/${milestoneId}-CONTEXT.md nor ` +
-    `.gsd/milestones/${milestoneId}/${milestoneId}-ROADMAP.md exists on disk. ` +
+    `${contextRel} nor ${roadmapRel} exists on disk. ` +
     `The ready phrase is a POST-WRITE signal and has been rejected. ` +
     `In this turn: (1) write PROJECT.md, REQUIREMENTS.md, and the milestone ` +
     `CONTEXT.md, (2) call gsd_plan_milestone, then (3) emit the ready phrase. ` +
@@ -688,14 +891,14 @@ export function maybeHandleEmptyIntentTurn(
   // path, handled by maybeHandleReadyPhraseWithoutFiles.
   if (READY_PHRASE_RE.test(text)) return false;
 
-  // Skip if the LLM is clearly handing back to the user. Last-line `?` is
-  // the strongest signal, but discuss flows often end with a freeform
-  // question followed by a closing remark ("…what should we build? I'll
-  // pick one if you don't care."). Treat ANY non-empty line ending in `?`
-  // as a question-asked signal — false negatives here auto-reply to the
+  // Skip if the LLM is clearly handing back to the user. Discuss flows
+  // often pose a question and follow it with a conditional intent on the
+  // same line ("Did I capture that correctly? If so, I'll write the
+  // requirements."). A line-trailing `?` check misses these because the
+  // line ends in `.`. Match any sentence-terminating `?` (followed by
+  // whitespace or end-of-text) — false negatives here auto-reply to the
   // user, which is a much worse failure mode than a missed nudge.
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  if (lines.some((l) => l.endsWith("?"))) return false;
+  if (/\?(?:\s|$)/.test(text)) return false;
 
   // Must contain a commit-intent phrase — this is the stall we care about.
   if (!COMMIT_INTENT_RE.test(text)) return false;
@@ -1069,7 +1272,7 @@ export async function showHeadlessMilestoneCreation(
   const prompt = buildHeadlessDiscussPrompt(nextId, seedContext, basePath);
 
   // Set pending auto start (auto-mode triggers on "Milestone X ready." via checkAutoStartAfterDiscuss)
-  pendingAutoStartMap.set(basePath, { ctx, pi, basePath, milestoneId: nextId, createdAt: Date.now() });
+  setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId: nextId });
 
   // Dispatch as discuss-milestone. The LLM writes PROJECT.md, REQUIREMENTS.md,
   // and CONTEXT.md, then calls gsd_plan_milestone — this is semantically the
@@ -1266,12 +1469,12 @@ export async function showDiscuss(
       const seed = draftContent
         ? `${basePrompt}\n\n## Prior Discussion (Draft Seed)\n\n${draftContent}`
         : basePrompt;
-      pendingAutoStartMap.set(basePath, { ctx, pi, basePath, milestoneId: mid, step: false, createdAt: Date.now() });
+      setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId: mid, step: false });
       await dispatchWorkflow(pi, seed, "gsd-discuss", ctx, "discuss-milestone");
     } else if (choice === "discuss_fresh") {
       const discussMilestoneTemplates = inlineTemplate("context", "Context");
       const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx);
-      pendingAutoStartMap.set(basePath, { ctx, pi, basePath, milestoneId: mid, step: false, createdAt: Date.now() });
+      setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId: mid, step: false });
       await dispatchWorkflow(pi, loadPrompt("guided-discuss-milestone", {
         milestoneId: mid, milestoneTitle, inlinedTemplates: discussMilestoneTemplates, structuredQuestionsAvailable,
         commitInstruction: buildDocsCommitInstruction(`docs(${mid}): milestone context from discuss`),
@@ -1283,7 +1486,7 @@ export async function showDiscuss(
       const milestoneIds = findMilestoneIds(basePath);
       const uniqueMilestoneIds = !!loadEffectiveGSDPreferences()?.preferences?.unique_milestone_ids;
       const nextId = nextMilestoneIdReserved(milestoneIds, uniqueMilestoneIds, basePath);
-      pendingAutoStartMap.set(basePath, { ctx, pi, basePath, milestoneId: nextId, step: false, createdAt: Date.now() });
+      setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId: nextId, step: false });
       await dispatchWorkflow(pi, await prepareAndBuildDiscussPrompt(ctx, pi, nextId, `New milestone ${nextId}.`, basePath), "gsd-run", ctx, "discuss-milestone");
     }
     return;
@@ -1574,6 +1777,9 @@ function selfHealRuntimeRecords(basePath: string, ctx: ExtensionContext): { clea
     for (const record of records) {
       const { unitType, unitId, phase } = record;
       // Clear records whose expected artifact already exists (completed but not cleaned up)
+      // TODO(C-future): selfHealRuntimeRecords iterates across all unit types (not just milestone
+      // units), so it cannot be converted to resolveExpectedArtifactPathForScope without
+      // first establishing a per-record scope.  Migrate once unit runtime records carry scope info.
       const artifactPath = resolveExpectedArtifactPath(unitType, unitId, basePath);
       if (artifactPath && existsSync(artifactPath)) {
         clearUnitRuntimeRecord(basePath, unitType, unitId);
@@ -1688,7 +1894,7 @@ async function handleMilestoneActions(
     const milestoneIds = findMilestoneIds(basePath);
     const uniqueMilestoneIds = !!loadEffectiveGSDPreferences()?.preferences?.unique_milestone_ids;
     const nextId = nextMilestoneIdReserved(milestoneIds, uniqueMilestoneIds, basePath);
-    pendingAutoStartMap.set(basePath, { ctx, pi, basePath, milestoneId: nextId, step: stepMode, createdAt: Date.now() });
+    setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId: nextId, step: stepMode });
     await dispatchWorkflow(pi, await prepareAndBuildDiscussPrompt(ctx, pi, nextId,
       `New milestone ${nextId}.`,
       basePath
@@ -1735,6 +1941,7 @@ export async function showSmartEntry(
   // milestones/) must trigger the init wizard, not skip it (#2942).
   const gsdPath = gsdRoot(basePath);
   const hasBootstrapArtifacts = hasGsdBootstrapArtifacts(gsdPath);
+  let skipGitBootstrap = false;
 
   if (!hasBootstrapArtifacts) {
     const detection = detectProjectState(basePath);
@@ -1754,6 +1961,7 @@ export async function showSmartEntry(
     // No .gsd/ or zombie .gsd/ — run the project init wizard
     const result = await showProjectInit(ctx, pi, basePath, detection);
     if (!result.completed) return; // User cancelled
+    skipGitBootstrap = result.gitEnabled === false;
 
     // Init wizard bootstrapped .gsd/ — fall through to the normal flow below
     // which will detect "no milestones" and start the discuss prompt
@@ -1763,19 +1971,21 @@ export async function showSmartEntry(
   // Also handle inherited repos: if basePath is a subdirectory of another
   // git repo that has no .gsd, create a fresh repo to prevent cross-project
   // state leaks (#1639).
-  if (!nativeIsRepo(basePath) || isInheritedRepo(basePath)) {
+  if (!skipGitBootstrap && (!nativeIsRepo(basePath) || isInheritedRepo(basePath))) {
     const mainBranch = loadEffectiveGSDPreferences()?.preferences?.git?.main_branch || "main";
     nativeInit(basePath, mainBranch);
   }
 
   // ── Ensure .gitignore has baseline patterns ──────────────────────────
-  ensureGitignore(basePath);
-  untrackRuntimeFiles(basePath);
+  if (!skipGitBootstrap && nativeIsRepo(basePath)) {
+    ensureGitignore(basePath);
+    untrackRuntimeFiles(basePath);
+  }
 
   // Deep setup can pre-create .gsd/PREFERENCES.md before the normal init
   // wizard path runs. If that path also initialized git, make HEAD reachable
   // now so later worktree/git-log operations do not run on an unborn branch.
-  if (nativeIsRepo(basePath) && !nativeHasCommittedHead(basePath)) {
+  if (!skipGitBootstrap && nativeIsRepo(basePath) && !nativeHasCommittedHead(basePath)) {
     try {
       nativeAddAll(basePath);
       nativeCommit(basePath, "chore: init project");
@@ -1802,10 +2012,12 @@ export async function showSmartEntry(
   if (interrupted.classification === "stale") {
     clearLock(basePath);
     if (interrupted.pausedSession) {
+      // Phase C pt 2: paused-session.json migrated to runtime_kv
+      // (global scope, key PAUSED_SESSION_KV_KEY).
       try {
-        unlinkSync(join(gsdRoot(basePath), "runtime", "paused-session.json"));
+        deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
       } catch (e) {
-        logWarning("guided", `stale pause file cleanup failed: ${(e as Error).message}`, { file: "guided-flow.ts" });
+        logWarning("guided", `stale paused-session DB cleanup failed: ${(e as Error).message}`, { file: "guided-flow.ts" });
       }
     }
   } else if (interrupted.classification === "recoverable") {
@@ -1869,14 +2081,12 @@ export async function showSmartEntry(
     // and fires another dispatchWorkflow, resetting the conversation mid-interview.
     if (pendingAutoStartMap.has(basePath)) {
       // #3274: If /clear interrupted the discussion, the pending entry is stale.
-      // Detect staleness: no manifest, no CONTEXT.md, AND entry is older than
+      // Detect staleness: no manifest, no milestone CONTEXT artifact, AND entry is older than
       // 30s (avoids race between .set() and LLM writing first artifact).
       const entry = pendingAutoStartMap.get(basePath)!;
       const ageMs = Date.now() - (entry.createdAt || 0);
       const manifestExists = existsSync(join(gsdRoot(basePath), "DISCUSSION-MANIFEST.json"));
-      const milestoneHasContext = existsSync(
-        join(gsdRoot(basePath), "milestones", entry.milestoneId, `${entry.milestoneId}-CONTEXT.md`),
-      );
+      const milestoneHasContext = !!resolveMilestoneFile(basePath, entry.milestoneId, "CONTEXT");
       if (!manifestExists && !milestoneHasContext && ageMs > 30_000) {
         // Stale entry from an interrupted discussion — clear and continue
         pendingAutoStartMap.delete(basePath);
@@ -1914,7 +2124,7 @@ export async function showSmartEntry(
 
     if (isFirst) {
       // First ever — skip wizard, just ask directly
-      pendingAutoStartMap.set(basePath, { ctx, pi, basePath, milestoneId: nextId, step: stepMode, createdAt: Date.now() });
+      setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId: nextId, step: stepMode });
       await dispatchWorkflow(pi, await prepareAndBuildDiscussPrompt(ctx, pi, nextId,
         `New project, milestone ${nextId}. Do NOT read or explore .gsd/ — it's empty scaffolding.`,
         basePath
@@ -1935,7 +2145,7 @@ export async function showSmartEntry(
       });
 
       if (choice === "new_milestone") {
-        pendingAutoStartMap.set(basePath, { ctx, pi, basePath, milestoneId: nextId, step: stepMode, createdAt: Date.now() });
+        setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId: nextId, step: stepMode });
         await dispatchWorkflow(pi, await prepareAndBuildDiscussPrompt(ctx, pi, nextId,
           `New milestone ${nextId}.`,
           basePath
@@ -1949,7 +2159,7 @@ export async function showSmartEntry(
   const milestoneTitle = state.activeMilestone.title;
 
   if (planV2GateDecision === "recover-missing-context") {
-    pendingAutoStartMap.set(basePath, { ctx, pi, basePath, milestoneId, step: stepMode, createdAt: Date.now() });
+    setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId, step: stepMode });
     await dispatchWorkflow(
       pi,
       await buildDiscussMilestonePrompt(
@@ -1991,7 +2201,7 @@ export async function showSmartEntry(
       const uniqueMilestoneIds = !!loadEffectiveGSDPreferences()?.preferences?.unique_milestone_ids;
       const nextId = nextMilestoneIdReserved(milestoneIds, uniqueMilestoneIds, basePath);
 
-      pendingAutoStartMap.set(basePath, { ctx, pi, basePath, milestoneId: nextId, step: stepMode, createdAt: Date.now() });
+      setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId: nextId, step: stepMode });
       await dispatchWorkflow(pi, await prepareAndBuildDiscussPrompt(ctx, pi, nextId,
         `New milestone ${nextId}.`,
         basePath
@@ -2043,12 +2253,12 @@ export async function showSmartEntry(
       const seed = draftContent
         ? `${basePrompt}\n\n## Prior Discussion (Draft Seed)\n\n${draftContent}`
         : basePrompt;
-      pendingAutoStartMap.set(basePath, { ctx, pi, basePath, milestoneId, step: stepMode, createdAt: Date.now() });
+      setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId, step: stepMode });
       await dispatchWorkflow(pi, seed, "gsd-discuss", ctx, "discuss-milestone");
     } else if (choice === "discuss_fresh") {
       const discussMilestoneTemplates = inlineTemplate("context", "Context");
       const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx);
-      pendingAutoStartMap.set(basePath, { ctx, pi, basePath, milestoneId, step: stepMode, createdAt: Date.now() });
+      setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId, step: stepMode });
       await dispatchWorkflow(pi, loadPrompt("guided-discuss-milestone", {
         milestoneId, milestoneTitle, inlinedTemplates: discussMilestoneTemplates, structuredQuestionsAvailable,
         commitInstruction: buildDocsCommitInstruction(`docs(${milestoneId}): milestone context from discuss`),
@@ -2058,7 +2268,7 @@ export async function showSmartEntry(
       const milestoneIds = findMilestoneIds(basePath);
       const uniqueMilestoneIds = !!loadEffectiveGSDPreferences()?.preferences?.unique_milestone_ids;
       const nextId = nextMilestoneIdReserved(milestoneIds, uniqueMilestoneIds, basePath);
-      pendingAutoStartMap.set(basePath, { ctx, pi, basePath, milestoneId: nextId, step: stepMode, createdAt: Date.now() });
+      setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId: nextId, step: stepMode });
       await dispatchWorkflow(pi, await prepareAndBuildDiscussPrompt(ctx, pi, nextId,
         `New milestone ${nextId}.`,
         basePath
@@ -2123,26 +2333,14 @@ export async function showSmartEntry(
       });
 
       if (choice === "plan") {
-        pendingAutoStartMap.set(basePath, { ctx, pi, basePath, milestoneId, step: stepMode, createdAt: Date.now() });
-        const planMilestoneTemplates = [
-          inlineTemplate("roadmap", "Roadmap"),
-          inlineTemplate("plan", "Slice Plan"),
-          inlineTemplate("task-plan", "Task Plan"),
-          inlineTemplate("secrets-manifest", "Secrets Manifest"),
-        ].join("\n\n---\n\n");
-        const secretsOutputPath = relMilestoneFile(basePath, milestoneId, "SECRETS");
-        await dispatchWorkflow(pi, loadPrompt("guided-plan-milestone", {
-          milestoneId,
-          milestoneTitle,
-          secretsOutputPath,
-          inlinedTemplates: planMilestoneTemplates,
-          skillActivation: buildSkillActivationBlock({
-            base: basePath,
-            milestoneId,
-            milestoneTitle,
-            extraContext: [planMilestoneTemplates],
-          }),
-        }), "gsd-run", ctx, "plan-milestone");
+        setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId, step: stepMode });
+        await dispatchWorkflow(
+          pi,
+          await buildPlanMilestonePrompt(milestoneId, milestoneTitle, basePath),
+          "gsd-run",
+          ctx,
+          "plan-milestone",
+        );
       } else if (choice === "discuss") {
         const discussMilestoneTemplates = inlineTemplate("context", "Context");
         const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx);
@@ -2155,7 +2353,7 @@ export async function showSmartEntry(
         const milestoneIds = findMilestoneIds(basePath);
         const uniqueMilestoneIds = !!loadEffectiveGSDPreferences()?.preferences?.unique_milestone_ids;
         const nextId = nextMilestoneIdReserved(milestoneIds, uniqueMilestoneIds, basePath);
-        pendingAutoStartMap.set(basePath, { ctx, pi, basePath, milestoneId: nextId, step: stepMode, createdAt: Date.now() });
+        setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId: nextId, step: stepMode });
         await dispatchWorkflow(pi, await prepareAndBuildDiscussPrompt(ctx, pi, nextId,
           `New milestone ${nextId}.`,
           basePath
@@ -2267,23 +2465,13 @@ export async function showSmartEntry(
     });
 
     if (choice === "plan") {
-      const planSliceTemplates = [
-        inlineTemplate("plan", "Slice Plan"),
-        inlineTemplate("task-plan", "Task Plan"),
-      ].join("\n\n---\n\n");
-      await dispatchWorkflow(pi, loadPrompt("guided-plan-slice", {
-        milestoneId,
-        sliceId,
-        sliceTitle,
-        inlinedTemplates: planSliceTemplates,
-        skillActivation: buildSkillActivationBlock({
-          base: basePath,
-          milestoneId,
-          sliceId,
-          sliceTitle,
-          extraContext: [planSliceTemplates],
-        }),
-      }), "gsd-run", ctx, "plan-slice");
+      await dispatchWorkflow(
+        pi,
+        await buildPlanSlicePrompt(milestoneId, milestoneTitle, sliceId, sliceTitle, basePath),
+        "gsd-run",
+        ctx,
+        "plan-slice",
+      );
     } else if (choice === "discuss") {
       const sqAvail = getStructuredQuestionsAvailability(pi, ctx);
       await dispatchWorkflow(pi, await buildDiscussSlicePrompt(milestoneId, sliceId, sliceTitle, basePath, { rediscuss: hasContext, structuredQuestionsAvailable: sqAvail }), "gsd-run", ctx, "discuss-slice");
@@ -2339,24 +2527,13 @@ export async function showSmartEntry(
     });
 
     if (choice === "complete") {
-      const completeSliceTemplates = [
-        inlineTemplate("slice-summary", "Slice Summary"),
-        inlineTemplate("uat", "UAT"),
-      ].join("\n\n---\n\n");
-      await dispatchWorkflow(pi, loadPrompt("guided-complete-slice", {
-        workingDirectory: basePath,
-        milestoneId,
-        sliceId,
-        sliceTitle,
-        inlinedTemplates: completeSliceTemplates,
-        skillActivation: buildSkillActivationBlock({
-          base: basePath,
-          milestoneId,
-          sliceId,
-          sliceTitle,
-          extraContext: [completeSliceTemplates],
-        }),
-      }), "gsd-run", ctx, "complete-slice");
+      await dispatchWorkflow(
+        pi,
+        await buildCompleteSlicePrompt(milestoneId, milestoneTitle, sliceId, sliceTitle, basePath),
+        "gsd-run",
+        ctx,
+        "complete-slice",
+      );
     } else if (choice === "status") {
       const { fireStatusViaCommand } = await import("./commands.js");
       await fireStatusViaCommand(ctx);
@@ -2431,22 +2608,13 @@ export async function showSmartEntry(
           }),
         }), "gsd-run", ctx, "execute-task");
       } else {
-        const executeTaskTemplates = inlineTemplate("task-summary", "Task Summary");
-        await dispatchWorkflow(pi, loadPrompt("guided-execute-task", {
-          milestoneId,
-          sliceId,
-          taskId,
-          taskTitle,
-          inlinedTemplates: executeTaskTemplates,
-          skillActivation: buildSkillActivationBlock({
-            base: basePath,
-            milestoneId,
-            sliceId,
-            taskId,
-            taskTitle,
-            extraContext: [executeTaskTemplates],
-          }),
-        }), "gsd-run", ctx, "execute-task");
+        await dispatchWorkflow(
+          pi,
+          await buildExecuteTaskPrompt(milestoneId, sliceId, sliceTitle, taskId, taskTitle, basePath),
+          "gsd-run",
+          ctx,
+          "execute-task",
+        );
       }
     } else if (choice === "status") {
       const { fireStatusViaCommand } = await import("./commands.js");

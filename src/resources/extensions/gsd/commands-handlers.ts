@@ -24,7 +24,7 @@ import {
 } from "./doctor.js";
 import { isAutoActive, checkRemoteAutoSession } from "./auto.js";
 import { getAutoWorktreePath } from "./auto-worktree.js";
-import { projectRoot } from "./commands/context.js";
+import { currentDirectoryRoot, projectRoot } from "./commands/context.js";
 import { loadPrompt } from "./prompt-loader.js";
 
 const UPDATE_REGISTRY_URL = "https://registry.npmjs.org/gsd-pi/latest";
@@ -203,7 +203,7 @@ export async function handleCapture(args: string, ctx: ExtensionCommandContext):
     return;
   }
 
-  const basePath = process.cwd();
+  const basePath = currentDirectoryRoot();
 
   // Ensure .gsd/ exists — capture should work even without a milestone
   const gsdDir = gsdRoot(basePath);
@@ -270,7 +270,7 @@ export async function handleTriage(ctx: ExtensionCommandContext, pi: ExtensionAP
 }
 
 export async function handleSteer(change: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
-  const basePath = process.cwd();
+  const basePath = currentDirectoryRoot();
   const state = await deriveState(basePath);
   const mid = state.activeMilestone?.id ?? "none";
   const sid = state.activeSlice?.id ?? "none";
@@ -343,7 +343,7 @@ export async function handleKnowledge(args: string, ctx: ExtensionCommandContext
   }
 
   const type = typeArg as "rule" | "pattern" | "lesson";
-  const basePath = process.cwd();
+  const basePath = currentDirectoryRoot();
   const state = await deriveState(basePath);
   const scope = state.activeMilestone?.id
     ? `${state.activeMilestone.id}${state.activeSlice ? `/${state.activeSlice.id}` : ""}`
@@ -372,7 +372,7 @@ Examples:
   }
 
   const [hookName, unitType, unitId] = parts;
-  const basePath = projectRoot();
+  const basePath = currentDirectoryRoot();
 
   // Import the hook trigger function
   const { triggerHookManually, formatHookStatus, getHookStatus } = await import("./post-unit-hooks.js");

@@ -81,13 +81,12 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
-  statSync,
-  unlinkSync,
 } from "node:fs";
 import { join } from "node:path";
 import { sep as pathSep } from "node:path";
 
 import { resolveProjectRootDbPath } from "./bootstrap/dynamic-tools.js";
+import { validateDirectory } from "./validate-directory.js";
 import {
   isCustomProvider,
   resolveDefaultSessionModel,
@@ -350,6 +349,12 @@ export async function bootstrapAutoSession(
     buildResolver,
   } = deps;
 
+  const dirCheck = validateDirectory(base);
+  if (dirCheck.severity === "blocked") {
+    ctx.ui.notify(dirCheck.reason!, "error");
+    return false;
+  }
+
   const lockResult = acquireSessionLock(base);
   if (!lockResult.acquired) {
     ctx.ui.notify(lockResult.reason, "error");
@@ -425,6 +430,16 @@ export async function bootstrapAutoSession(
         `GSD_PROJECT_ID must contain only alphanumeric characters, hyphens, and underscores. Got: "${customProjectId}"`,
         "error",
       );
+      return releaseLockAndReturn();
+    }
+
+    const gitLockFile = join(base, ".git", "index.lock");
+    if (existsSync(gitLockFile)) {
+      ctx.ui.notify(
+        "Git index lock is present at .git/index.lock. Another git process may be running; resolve the lock before starting GSD.",
+        "error",
+      );
+      debugLog("git-index-lock-present-preflight", { path: gitLockFile });
       return releaseLockAndReturn();
     }
 
@@ -648,9 +663,10 @@ export async function bootstrapAutoSession(
       hasSurvivorBranch = false;
     }
 
+    const effectivePrefs = loadEffectiveGSDPreferences(base)?.preferences;
     const deepProjectStagePending = !hasSurvivorBranch
       ? (await import("./auto-dispatch.js")).hasPendingDeepStage(
-          loadEffectiveGSDPreferences(base)?.preferences,
+          effectivePrefs,
           base,
         )
       : false;
@@ -699,7 +715,7 @@ export async function bootstrapAutoSession(
         const mid = state.activeMilestone!.id;
         const contextFile = resolveMilestoneFile(base, mid, "CONTEXT");
         const hasContext = !!(contextFile && (await loadFile(contextFile)));
-        if (!hasContext) {
+        if (!hasContext && effectivePrefs?.planning_depth !== "deep") {
           const { showSmartEntry } = await import("./guided-flow.js");
           await showSmartEntry(ctx, pi, base, { step: requestedStepMode });
 
@@ -840,18 +856,11 @@ export async function bootstrapAutoSession(
     const gsdDbPath = resolveProjectRootDbPath(s.basePath);
     const gsdDirPath = join(s.basePath, ".gsd");
     if (existsSync(gsdDirPath) && !existsSync(gsdDbPath)) {
-      const hasDecisions = existsSync(join(gsdDirPath, "DECISIONS.md"));
-      const hasRequirements = existsSync(join(gsdDirPath, "REQUIREMENTS.md"));
-      const hasMilestones = existsSync(join(gsdDirPath, "milestones"));
       try {
         const { openDatabase: openDb } = await import("./gsd-db.js");
         openDb(gsdDbPath);
-        if (hasDecisions || hasRequirements || hasMilestones) {
-          const { migrateFromMarkdown } = await import("./md-importer.js");
-          migrateFromMarkdown(s.basePath);
-        }
       } catch (err) {
-        logError("engine", `auto-migration failed: ${(err as Error).message}`);
+        logError("engine", `failed to initialize project database: ${(err as Error).message}`);
       }
     }
     if (existsSync(gsdDbPath) && !isDbAvailable()) {
@@ -944,6 +953,15 @@ export async function bootstrapAutoSession(
         : "Will loop until milestone complete.";
     ctx.ui.notify(`${modeLabel} started. ${scopeMsg}`, "info");
 
+    const providerReportedWindow = ctx.model?.contextWindow ?? 0;
+    const contextOverride = loadEffectiveGSDPreferences(base)?.preferences.context_window_override;
+    if (providerReportedWindow > 500_000 && contextOverride === undefined) {
+      ctx.ui.notify(
+        `Model reports a ${Math.round(providerReportedWindow / 1000)}K context window. If the provider's real API limit is lower, set context_window_override in .gsd/PREFERENCES.md so wrap-up signals fire before context overflow.`,
+        "warning",
+      );
+    }
+
     // Show dynamic routing status so users know upfront if models will be
     // downgraded for simple tasks (#3962).
     // Use the same effective logic as selectAndApplyModel: check flat-rate
@@ -1019,42 +1037,6 @@ export async function bootstrapAutoSession(
           "warning",
         );
       }
-    }
-
-    // Self-heal: remove stale .git/index.lock.
-    //
-    // Threshold raised from 60s → 5min because a 60s-old lock is not
-    // definitively stale: `git gc --auto` triggered by a heavy commit, NFS
-    // delays, or concurrent worktree writes can hold .git/index.lock for
-    // minutes on large repos. Force-removing a live lock causes the holder
-    // to encounter `fatal: Unable to create '.git/index.lock'` on its next
-    // write, or worse, operate on a partially-written index → corruption
-    // requiring `git fsck`/`git reset` to recover.
-    // (Issue #4980 CRIT-3)
-    try {
-      const gitLockFile = join(base, ".git", "index.lock");
-      if (existsSync(gitLockFile)) {
-        const lockAge = Date.now() - statSync(gitLockFile).mtimeMs;
-        const STALE_GIT_LOCK_THRESHOLD_MS = 5 * 60_000;
-        if (lockAge > STALE_GIT_LOCK_THRESHOLD_MS) {
-          unlinkSync(gitLockFile);
-          ctx.ui.notify(
-            `Removed stale .git/index.lock (age ${Math.round(lockAge / 1000)}s, > 5min threshold).`,
-            "warning",
-          );
-        } else {
-          // Lock present but not yet stale — surface so the user knows why
-          // git ops may be queueing instead of silently waiting.
-          debugLog("git-lock-present-not-stale", {
-            ageMs: lockAge,
-            thresholdMs: STALE_GIT_LOCK_THRESHOLD_MS,
-          });
-        }
-      }
-    } catch (e) {
-      debugLog("git-lock-cleanup-failed", {
-        error: e instanceof Error ? e.message : String(e),
-      });
     }
 
     // Pre-flight: validate milestone queue

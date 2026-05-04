@@ -399,6 +399,140 @@ test("runDispatch pauses when complete-milestone summary exists on disk but the 
   assert.equal(stopCalls, 0, "mismatch pause should not hard-stop the loop");
 });
 
+test("runDispatch clears stuck state after Level 1 artifact recovery", async (t) => {
+  const capture = createEventCapture();
+  let invalidateCalls = 0;
+  let stopCalls = 0;
+  const base = join(tmpdir(), `gsd-stuck-plan-${randomUUID()}`);
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
+  const tasksDir = join(sliceDir, "tasks");
+  mkdirSync(tasksDir, { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "pending" });
+  insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", title: "First task", status: "pending" });
+  writeFileSync(join(sliceDir, "S01-PLAN.md"), "# S01\n\n## Tasks\n\n- [ ] **T01: First task** `est:1h`\n");
+  writeFileSync(join(tasksDir, "T01-PLAN.md"), "# T01 Plan\n");
+
+  const deps = makeMockDeps(capture, {
+    invalidateAllCaches: () => { invalidateCalls++; },
+    stopAuto: async () => { stopCalls++; },
+    resolveDispatch: async () => ({
+      action: "dispatch" as const,
+      unitType: "plan-slice",
+      unitId: "M001/S01",
+      prompt: "plan the slice",
+      matchedRule: "planning → plan-slice",
+    }),
+  });
+  const ic = makeIC(deps, {
+    s: {
+      ...makeSession(),
+      basePath: base,
+      originalBasePath: base,
+    } as any,
+  });
+  const preData: PreDispatchData = {
+    state: {
+      phase: "planning",
+      activeMilestone: { id: "M001", title: "Test", status: "active" },
+      activeSlice: { id: "S01", title: "Slice" },
+      registry: [{ id: "M001", status: "active" }],
+      blockers: [],
+    } as any,
+    mid: "M001",
+    midTitle: "Test Milestone",
+  };
+  const loopState: LoopState = {
+    recentUnits: [
+      { key: "plan-slice/M001/S01" },
+      { key: "plan-slice/M001/S01" },
+    ],
+    stuckRecoveryAttempts: 0,
+    consecutiveFinalizeTimeouts: 0,
+  };
+
+  const result = await runDispatch(ic, preData, loopState);
+
+  assert.equal(result.action, "continue");
+  assert.equal(invalidateCalls, 1, "Level 1 artifact recovery should invalidate caches");
+  assert.equal(stopCalls, 0, "Level 1 artifact recovery should not hard-stop");
+  assert.deepEqual(loopState.recentUnits, [], "Level 1 artifact recovery should clear the stuck window");
+  assert.equal(loopState.stuckRecoveryAttempts, 0, "Level 1 artifact recovery should reset the recovery counter");
+});
+
+test("runDispatch escapes Level 2 stuck stop when artifact verifies after cache invalidation", async (t) => {
+  const capture = createEventCapture();
+  let invalidateCalls = 0;
+  let stopCalls = 0;
+  const base = join(tmpdir(), `gsd-stuck-plan-l2-${randomUUID()}`);
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
+  const tasksDir = join(sliceDir, "tasks");
+  mkdirSync(tasksDir, { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "pending" });
+  insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", title: "First task", status: "pending" });
+  writeFileSync(join(sliceDir, "S01-PLAN.md"), "# S01\n\n## Tasks\n\n- [ ] **T01: First task** `est:1h`\n");
+  writeFileSync(join(tasksDir, "T01-PLAN.md"), "# T01 Plan\n");
+
+  const deps = makeMockDeps(capture, {
+    invalidateAllCaches: () => { invalidateCalls++; },
+    stopAuto: async () => { stopCalls++; },
+    resolveDispatch: async () => ({
+      action: "dispatch" as const,
+      unitType: "plan-slice",
+      unitId: "M001/S01",
+      prompt: "plan the slice",
+      matchedRule: "planning → plan-slice",
+    }),
+  });
+  const ic = makeIC(deps, {
+    s: {
+      ...makeSession(),
+      basePath: base,
+      originalBasePath: base,
+    } as any,
+  });
+  const preData: PreDispatchData = {
+    state: {
+      phase: "planning",
+      activeMilestone: { id: "M001", title: "Test", status: "active" },
+      activeSlice: { id: "S01", title: "Slice" },
+      registry: [{ id: "M001", status: "active" }],
+      blockers: [],
+    } as any,
+    mid: "M001",
+    midTitle: "Test Milestone",
+  };
+  const loopState: LoopState = {
+    recentUnits: [
+      { key: "plan-slice/M001/S01" },
+      { key: "plan-slice/M001/S01" },
+    ],
+    stuckRecoveryAttempts: 1,
+    consecutiveFinalizeTimeouts: 0,
+  };
+
+  const result = await runDispatch(ic, preData, loopState);
+
+  assert.equal(result.action, "continue");
+  assert.equal(invalidateCalls, 1, "Level 2 escape should invalidate caches before rechecking artifacts");
+  assert.equal(stopCalls, 0, "verified artifacts should escape Level 2 hard stop");
+  assert.deepEqual(loopState.recentUnits, [], "Level 2 artifact escape should clear the stuck window");
+  assert.equal(loopState.stuckRecoveryAttempts, 0, "Level 2 artifact escape should reset the recovery counter");
+});
+
 test("runUnitPhase emits unit-start and unit-end with causedBy reference", async () => {
   const capture = createEventCapture();
 
@@ -410,7 +544,7 @@ test("runUnitPhase emits unit-start and unit-end with causedBy reference", async
   // Instead, we test that unit-start is emitted at the right point by examining
   // the event immediately after calling runUnitPhase with a session where
   // newSession resolves quickly, and we resolve the agent_end externally.
-  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto-loop.js");
+  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
   _resetPendingResolve();
 
   const deps = makeMockDeps(capture);
@@ -464,7 +598,7 @@ test("runUnitPhase emits unit-start and unit-end with causedBy reference", async
 
 test("runUnitPhase increments unitDispatchCount for repeated artifact-missing retries", async () => {
   const capture = createEventCapture();
-  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto-loop.js");
+  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
   _resetPendingResolve();
 
   const deps = makeMockDeps(capture);
@@ -499,7 +633,7 @@ test("runUnitPhase increments unitDispatchCount for repeated artifact-missing re
 
 test("all events from a mock iteration have monotonically increasing seq and same flowId", async () => {
   const capture = createEventCapture();
-  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto-loop.js");
+  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
   _resetPendingResolve();
 
   const deps = makeMockDeps(capture, {
@@ -856,7 +990,7 @@ test("milestone-transition event is emitted when milestone changes", async () =>
 
 test("unit-end event contains errorContext when unit is cancelled with structured error", async () => {
   const capture = createEventCapture();
-  const { resolveAgentEndCancelled, _resetPendingResolve } = await import("../auto-loop.js");
+  const { resolveAgentEndCancelled, _resetPendingResolve } = await import("../auto/resolve.js");
   _resetPendingResolve();
 
   let pauseCalls = 0;
@@ -911,7 +1045,7 @@ test("unit-end event contains errorContext when unit is cancelled with structure
 
 test("session-failed cancellations close out and emit unit-end before hard stop", async () => {
   const capture = createEventCapture();
-  const { resolveAgentEndCancelled, _resetPendingResolve } = await import("../auto-loop.js");
+  const { resolveAgentEndCancelled, _resetPendingResolve } = await import("../auto/resolve.js");
   _resetPendingResolve();
 
   let closeoutCalls = 0;
@@ -1023,7 +1157,7 @@ test("runFinalize pauses and emits unit-end when pre-verification times out", as
 
 test("transient session-failed cancellations pause instead of hard-stopping", async () => {
   const capture = createEventCapture();
-  const { resolveAgentEndCancelled, _resetPendingResolve } = await import("../auto-loop.js");
+  const { resolveAgentEndCancelled, _resetPendingResolve } = await import("../auto/resolve.js");
   _resetPendingResolve();
 
   const deps = makeMockDeps(capture);

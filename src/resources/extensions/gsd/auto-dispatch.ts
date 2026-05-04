@@ -14,7 +14,7 @@ import type { GSDPreferences } from "./preferences.js";
 import type { UatType } from "./files.js";
 import type { MinimalModelRegistry } from "./context-budget.js";
 import { loadFile, extractUatType, loadActiveOverrides } from "./files.js";
-import { isDbAvailable, getMilestoneSlices, getPendingGates, markAllGatesOmitted, getMilestone, updateMilestoneStatus } from "./gsd-db.js";
+import { isDbAvailable, getMilestoneSlices, getPendingGates, markAllGatesOmitted, getMilestone, insertAssessment, transaction } from "./gsd-db.js";
 import { isClosedStatus } from "./status-guards.js";
 import { extractVerdict, isAcceptableUatVerdict } from "./verdict-parser.js";
 
@@ -35,7 +35,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "
 import { logWarning, logError } from "./workflow-logger.js";
 import { join } from "node:path";
 import { hasImplementationArtifacts } from "./auto-recovery.js";
-import { classifyMilestoneSummaryContent } from "./milestone-summary-classifier.js";
 import {
   buildDiscussMilestonePrompt,
   buildDiscussProjectPrompt,
@@ -78,6 +77,9 @@ import {
   resolveDeepProjectSetupState,
   type DeepProjectSetupStage,
 } from "./deep-project-setup-policy.js";
+import { annotateBackgroundable } from "./delegation-policy.js";
+import { invalidateAllCaches } from "./cache.js";
+import { insertMilestoneValidationGates } from "./milestone-validation-gates.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -90,6 +92,12 @@ export type DispatchAction =
       pauseAfterDispatch?: boolean;
       /** Name of the matched dispatch rule from the unified registry (journal provenance). */
       matchedRule?: string;
+      /**
+       * True when the matched unit type has a `good` verdict in delegation-policy.ts.
+       * Annotated in `resolveDispatch`. Consumers may use this to fork the prompt
+       * to a background sub-agent; default behavior is unchanged (synchronous).
+       */
+      backgroundable?: boolean;
     }
   | { action: "stop"; reason: string; level: "info" | "warning" | "error"; matchedRule?: string }
   | { action: "skip"; matchedRule?: string };
@@ -106,6 +114,8 @@ export interface DispatchContext {
   sessionContextWindow?: number;
   /** Model registry forwarded to the budget engine so it can look up the configured executor model. */
   modelRegistry?: MinimalModelRegistry;
+  /** Session model provider, used for provider-specific effective context windows. */
+  sessionProvider?: string;
 }
 
 type ReassessmentChecker = typeof checkNeedsReassessment;
@@ -682,6 +692,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
       const contextFile = resolveMilestoneFile(basePath, mid, "CONTEXT");
       const hasContext = !!(contextFile && (await loadFile(contextFile)));
       if (hasContext) return null; // fall through to next rule
+      if (prefs?.planning_depth === "deep") return null;
       // H6 fix (#4973): keep the non-deep auto-mode bypass, but do not
       // pre-verify deep planning's user-facing milestone approval gate.
       if (shouldBypassMilestoneDepthGateInAuto(prefs)) {
@@ -852,15 +863,11 @@ export const DISPATCH_RULES: DispatchRule[] = [
     // while a slice is still `is_sketch=1`, fall through to a standard
     // plan-slice so the loop doesn't dead-end.
     //
-    // Note on the flag-OFF downgrade: plan-slice does not explicitly clear
-    // `is_sketch`. After it writes PLAN.md, the auto-heal in state.ts's
-    // `deriveStateFromDb` (via `autoHealSketchFlags`) flips the flag on the
-    // next iteration. That implicit coupling is the sole mechanism that
-    // reconciles `is_sketch=1` on the plan-slice path — do not remove the
-    // auto-heal without either adding an explicit `setSliceSketchFlag(..., false)`
-    // call here or doing so inside the plan-slice tool handler.
+    // Note on the flag-OFF downgrade: DB slice metadata is authoritative.
+    // PLAN.md is only a projection, so plan-slice/refine-slice handlers must
+    // explicitly clear `is_sketch` when a sketch becomes a full plan.
     name: "refining → refine-slice",
-    match: async ({ state, mid, midTitle, basePath, prefs, sessionContextWindow, modelRegistry }) => {
+    match: async ({ state, mid, midTitle, basePath, prefs, sessionContextWindow, modelRegistry, sessionProvider }) => {
       if (state.phase !== "refining") return null;
       if (!state.activeSlice) return missingSliceStop(mid, state.phase);
       const sid = state.activeSlice.id;
@@ -885,7 +892,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
           unitId: `${mid}/${sid}`,
           prompt: await buildPlanSlicePrompt(
             mid, midTitle, sid, sTitle, basePath, undefined,
-            { ...(softScopeHint ? { softScopeHint } : {}), sessionContextWindow, modelRegistry },
+            { ...(softScopeHint ? { softScopeHint } : {}), sessionContextWindow, modelRegistry, sessionProvider },
           ),
         };
       }
@@ -895,14 +902,14 @@ export const DISPATCH_RULES: DispatchRule[] = [
         unitId: `${mid}/${sid}`,
         prompt: await buildRefineSlicePrompt(
           mid, midTitle, sid, sTitle, basePath, undefined,
-          { sessionContextWindow, modelRegistry },
+          { sessionContextWindow, modelRegistry, sessionProvider },
         ),
       };
     },
   },
   {
     name: "planning → plan-slice",
-    match: async ({ state, mid, midTitle, basePath, sessionContextWindow, modelRegistry, session }) => {
+    match: async ({ state, mid, midTitle, basePath, sessionContextWindow, modelRegistry, sessionProvider, session }) => {
       if (state.phase !== "planning") return null;
       if (!state.activeSlice) return missingSliceStop(mid, state.phase);
       const sid = state.activeSlice!.id;
@@ -931,7 +938,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
           sTitle,
           basePath,
           undefined,
-          { sessionContextWindow, modelRegistry, priorPreExecFailure },
+          { sessionContextWindow, modelRegistry, sessionProvider, priorPreExecFailure },
         ),
       };
     },
@@ -992,7 +999,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
   },
   {
     name: "executing → reactive-execute (parallel dispatch)",
-    match: async ({ state, mid, midTitle, basePath, prefs, sessionContextWindow, modelRegistry }) => {
+    match: async ({ state, mid, midTitle, basePath, prefs, sessionContextWindow, modelRegistry, sessionProvider }) => {
       if (state.phase !== "executing" || !state.activeTask) return null;
       if (!state.activeSlice) return null; // fall through
 
@@ -1095,7 +1102,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
             selected,
             basePath,
             subagentModel,
-            { sessionContextWindow, modelRegistry },
+            { sessionContextWindow, modelRegistry, sessionProvider },
           ),
         };
       } catch (err) {
@@ -1107,7 +1114,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
   },
   {
     name: "executing → execute-task (recover missing task plan → plan-slice)",
-    match: async ({ state, mid, midTitle, basePath, sessionContextWindow, modelRegistry }) => {
+    match: async ({ state, mid, midTitle, basePath, sessionContextWindow, modelRegistry, sessionProvider }) => {
       if (state.phase !== "executing" || !state.activeTask) return null;
       if (!state.activeSlice) return missingSliceStop(mid, state.phase);
       const sid = state.activeSlice!.id;
@@ -1132,7 +1139,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
             sTitle,
             basePath,
             undefined,
-            { sessionContextWindow, modelRegistry },
+            { sessionContextWindow, modelRegistry, sessionProvider },
           ),
         };
       }
@@ -1142,7 +1149,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
   },
   {
     name: "executing → execute-task",
-    match: async ({ state, mid, basePath, sessionContextWindow, modelRegistry }) => {
+    match: async ({ state, mid, basePath, sessionContextWindow, modelRegistry, sessionProvider }) => {
       if (state.phase !== "executing" || !state.activeTask) return null;
       if (!state.activeSlice) return missingSliceStop(mid, state.phase);
       const sid = state.activeSlice!.id;
@@ -1161,7 +1168,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
           tid,
           tTitle,
           basePath,
-          { sessionContextWindow, modelRegistry },
+          { sessionContextWindow, modelRegistry, sessionProvider },
         ),
       };
     },
@@ -1199,9 +1206,12 @@ export const DISPATCH_RULES: DispatchRule[] = [
           const skipSource = trivialVariant
             ? "trivial-scope pipeline variant (#4781)"
             : "`skip_milestone_validation` preference";
+          const skipValidationReason = trivialVariant ? "trivial-scope" : "preference";
           const content = [
             "---",
             "verdict: pass",
+            "skip_validation: true",
+            `skip_validation_reason: ${skipValidationReason}`,
             "remediation_round: 0",
             "---",
             "",
@@ -1210,6 +1220,45 @@ export const DISPATCH_RULES: DispatchRule[] = [
             `Milestone validation was skipped via ${skipSource}.`,
           ].join("\n");
           writeFileSync(validationPath, content, "utf-8");
+          try {
+            // DB-backed state derivation keys off assessments, not only the file
+            // projection. Persist the skipped validation there too so the next
+            // loop iteration advances to completing-milestone instead of
+            // re-entering validating-milestone.
+            if (isDbAvailable()) {
+              transaction(() => {
+                insertAssessment({
+                  path: validationPath,
+                  milestoneId: mid,
+                  sliceId: null,
+                  taskId: null,
+                  status: "pass",
+                  scope: "milestone-validation",
+                  fullContent: content,
+                });
+                const gateSliceId = getMilestoneSlices(mid)[0]?.id;
+                if (gateSliceId) {
+                  insertMilestoneValidationGates(
+                    mid,
+                    gateSliceId,
+                    "pass",
+                    new Date().toISOString(),
+                  );
+                }
+              });
+            }
+          } catch (err) {
+            try {
+              unlinkSync(validationPath);
+            } catch (unlinkErr) {
+              logWarning(
+                "dispatch",
+                `failed to remove skipped validation file after DB write failure for ${mid}: ${unlinkErr instanceof Error ? unlinkErr.message : String(unlinkErr)}`,
+              );
+            }
+            throw err;
+          }
+          invalidateAllCaches();
         }
         return { action: "skip" };
       }
@@ -1234,15 +1283,6 @@ export const DISPATCH_RULES: DispatchRule[] = [
         const milestone = getMilestone(mid);
         if (milestone && isClosedStatus(milestone.status)) {
           return { action: "skip" };
-        }
-      }
-
-      const existingSummary = resolveMilestoneFile(basePath, mid, "SUMMARY");
-      let summaryOutcome: "success" | "failure" | "unknown" = "unknown";
-      if (existingSummary) {
-        const summaryContent = await loadFile(existingSummary);
-        if (summaryContent) {
-          summaryOutcome = classifyMilestoneSummaryContent(summaryContent);
         }
       }
 
@@ -1303,7 +1343,9 @@ export const DISPATCH_RULES: DispatchRule[] = [
               if (validationContent) {
                 // Allow completion when validation was intentionally skipped by
                 // preference/budget profile (#3399, #3344).
+                const skippedByMarker = /^skip_validation:\s*true$/im.test(validationContent);
                 const skippedByPreference = /skip(?:ped)?[\s\-]+(?:by|per|due to)\s+(?:preference|budget|profile)/i.test(validationContent);
+                const skippedByTrivialVariant = /trivial-scope pipeline variant/i.test(validationContent);
 
                 // Accept either the structured template format (table with MET/N/A/SATISFIED)
                 // or prose evidence patterns the validation agent may emit.
@@ -1312,7 +1354,12 @@ export const DISPATCH_RULES: DispatchRule[] = [
                   (validationContent.includes("MET") || validationContent.includes("N/A") || validationContent.includes("SATISFIED"));
                 const proseMatch =
                   /[Oo]perational[\s\S]{0,500}?(?:✅|pass|verified|confirmed|met|complete|true|yes|addressed|covered|satisfied|partially|n\/a|not[\s-]+applicable)/i.test(validationContent);
-                const hasOperationalCheck = skippedByPreference || structuredMatch || proseMatch;
+                const hasOperationalCheck =
+                  skippedByMarker ||
+                  skippedByPreference ||
+                  skippedByTrivialVariant ||
+                  structuredMatch ||
+                  proseMatch;
                 if (!hasOperationalCheck) {
                   return {
                     action: "stop" as const,
@@ -1326,48 +1373,6 @@ export const DISPATCH_RULES: DispatchRule[] = [
         }
       } catch (err) { /* fall through — don't block on DB errors */
         logWarning("dispatch", `verification class check failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-
-      // Disk/DB mismatch handling (#4658): SUMMARY presence alone is not enough.
-      // Apply post-gate policy:
-      // - success summary: reconcile DB and skip re-dispatch
-      // - failure summary: pause/fail-closed
-      // - unknown summary: pause/fail-closed
-      if (existingSummary) {
-        const milestone = isDbAvailable() ? getMilestone(mid) : null;
-        const status = milestone?.status ?? (isDbAvailable() ? "missing" : "unavailable");
-
-        if (summaryOutcome === "success") {
-          if (!isDbAvailable()) {
-            logWarning("dispatch", `Milestone ${mid} SUMMARY indicates completion while DB is unavailable — skipping duplicate complete-milestone dispatch`);
-            return { action: "skip" };
-          }
-          try {
-            updateMilestoneStatus(mid, "complete", new Date().toISOString());
-            logWarning("dispatch", `Milestone ${mid} SUMMARY indicates completion while DB status was "${status}" — reconciled DB to complete (#4658)`);
-            return { action: "skip" };
-          } catch (err) {
-            return {
-              action: "stop",
-              level: "warning",
-              reason: `Milestone ${mid} SUMMARY indicates completion but DB reconciliation failed (${err instanceof Error ? err.message : String(err)}). Auto-mode paused for manual review.`,
-            };
-          }
-        }
-
-        if (summaryOutcome === "failure") {
-          return {
-            action: "stop",
-            level: "warning",
-            reason: `Milestone ${mid} has a failure-path SUMMARY while DB status is "${status}". Auto-mode will not promote completion from failure artifacts. Re-run complete-milestone only after blockers are resolved and verification passes.`,
-          };
-        }
-
-        return {
-          action: "stop",
-          level: "warning",
-          reason: `Milestone ${mid} has an ambiguous SUMMARY while DB status is "${status}". Auto-mode paused instead of promoting completion from file presence alone.`,
-        };
       }
 
       return {
@@ -1420,7 +1425,7 @@ export async function resolveDispatch(
   // Delegate to registry when available
   try {
     const registry = getRegistry();
-    return await registry.evaluateDispatch(ctx);
+    return annotateBackgroundable(await registry.evaluateDispatch(ctx));
   } catch (err) {
     // Registry not initialized — fall back to inline loop
     logWarning("dispatch", `registry dispatch failed, falling back to inline rules: ${err instanceof Error ? err.message : String(err)}`);
@@ -1430,7 +1435,7 @@ export async function resolveDispatch(
     const result = await rule.match(ctx);
     if (result) {
       if (result.action !== "skip") result.matchedRule = rule.name;
-      return result;
+      return annotateBackgroundable(result);
     }
   }
 
@@ -1445,6 +1450,7 @@ export async function resolveDispatch(
     matchedRule: "<no-match>",
   };
 }
+
 
 /** Exposed for testing — returns the rule names in evaluation order. */
 export function getDispatchRuleNames(): string[] {

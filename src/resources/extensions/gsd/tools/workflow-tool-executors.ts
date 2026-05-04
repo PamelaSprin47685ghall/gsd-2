@@ -2,6 +2,8 @@ import { ensureDbOpen } from "../bootstrap/dynamic-tools.js";
 import { sanitizeCompleteMilestoneParams } from "../bootstrap/sanitize-complete-milestone.js";
 import { loadWriteGateSnapshot, shouldBlockContextArtifactSaveInSnapshot, shouldBlockRootArtifactSaveInSnapshot } from "../bootstrap/write-gate.js";
 import {
+  getActiveRequirements,
+  insertMilestone,
   getMilestone,
   getSliceStatusSummary,
   getSliceTaskCounts,
@@ -9,7 +11,7 @@ import {
   saveGateResult,
 } from "../gsd-db.js";
 import { GATE_REGISTRY } from "../gate-registry.js";
-import { saveArtifactToDb } from "../db-writer.js";
+import { generateRequirementsMd, saveArtifactToDb } from "../db-writer.js";
 import { resolveMilestoneFile, resolveSliceFile } from "../paths.js";
 import { unlinkSync } from "node:fs";
 import type { CompleteMilestoneParams } from "./complete-milestone.js";
@@ -30,6 +32,7 @@ import { handleValidateMilestone } from "./validate-milestone.js";
 import { logError, logWarning } from "../workflow-logger.js";
 import { invalidateStateCache } from "../state.js";
 import { loadEffectiveGSDPreferences } from "../preferences.js";
+import { parseProject } from "../schemas/parsers.js";
 
 export const SUPPORTED_SUMMARY_ARTIFACT_TYPES = [
   "SUMMARY",
@@ -68,6 +71,20 @@ export interface SummarySaveParams {
   task_id?: string;
   artifact_type: string;
   content: string;
+}
+
+function registerProjectMilestoneSequence(content: string): string[] {
+  const parsed = parseProject(content);
+  const registered: string[] = [];
+  for (const milestone of parsed.milestones) {
+    insertMilestone({
+      id: milestone.id,
+      title: milestone.title,
+      status: milestone.done ? "complete" : "queued",
+    });
+    registered.push(milestone.id);
+  }
+  return registered;
 }
 
 export async function executeSummarySave(
@@ -141,17 +158,97 @@ export async function executeSummarySave(
       relativePath = `milestones/${params.milestone_id}/${params.milestone_id}-${params.artifact_type}.md`;
     }
 
+    const activeRequirements = params.artifact_type === "REQUIREMENTS"
+      ? getActiveRequirements()
+      : null;
+    if (params.artifact_type === "REQUIREMENTS" && activeRequirements?.length === 0) {
+      return {
+        content: [{ type: "text", text: "Error: Cannot save REQUIREMENTS artifact — no active requirements found in the database. Call gsd_requirement_save for each requirement before calling gsd_summary_save(REQUIREMENTS)." }],
+        details: { operation: "save_summary", error: "no_active_requirements" },
+        isError: true,
+      };
+    }
+
+    const contentToSave = params.artifact_type === "REQUIREMENTS"
+      ? generateRequirementsMd(activeRequirements ?? [])
+      : params.content;
+    const contentSource = params.artifact_type === "REQUIREMENTS"
+      ? "requirements_table"
+      : "provided_content";
+    const isRootArtifact = isRootSummaryArtifactType(params.artifact_type);
+
     await saveArtifactToDb(
       {
         path: relativePath,
         artifact_type: params.artifact_type,
-        content: params.content,
-        milestone_id: params.milestone_id,
-        slice_id: params.slice_id,
-        task_id: params.task_id,
+        content: contentToSave,
+        milestone_id: isRootArtifact ? undefined : params.milestone_id,
+        slice_id: isRootArtifact ? undefined : params.slice_id,
+        task_id: isRootArtifact ? undefined : params.task_id,
       },
       basePath,
     );
+
+    let registeredMilestones: string[] = [];
+    if (params.artifact_type === "PROJECT") {
+      try {
+        registeredMilestones = registerProjectMilestoneSequence(contentToSave);
+        if (registeredMilestones.length > 0) invalidateStateCache();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logError("tool", `gsd_summary_save: PROJECT artifact persisted but milestone registration threw: ${msg}`, {
+          tool: "gsd_summary_save",
+          error: String(err),
+          stack: err instanceof Error ? err.stack ?? "" : "",
+        });
+        // PROJECT.md was persisted by saveArtifactToDb above; the artifacts row
+        // changed even though no milestones registered. Invalidate so subsequent
+        // /gsd reads see the persisted artifact instead of the pre-save cache.
+        invalidateStateCache();
+        return {
+          content: [{
+            type: "text",
+            text:
+              `Error: PROJECT.md was saved to ${relativePath} but milestone registration failed: ${msg}. ` +
+              `The DB has no milestone rows for this project, so /gsd will report "No Active Milestone". ` +
+              `Re-call gsd_summary_save(PROJECT) once the underlying error is resolved — INSERT OR IGNORE makes registration idempotent.`,
+          }],
+          details: {
+            operation: "save_summary",
+            path: relativePath,
+            artifact_type: params.artifact_type,
+            error: "milestone_registration_threw",
+            registration_error: msg,
+          },
+          isError: true,
+        };
+      }
+      if (registeredMilestones.length === 0) {
+        logError("tool", `gsd_summary_save: PROJECT.md saved to ${relativePath} but parsed zero milestones — registration produced no DB rows`, {
+          tool: "gsd_summary_save",
+        });
+        // PROJECT.md was persisted; invalidate so subsequent reads see the new
+        // artifacts row even though no milestones registered.
+        invalidateStateCache();
+        return {
+          content: [{
+            type: "text",
+            text:
+              `Error: PROJECT.md was saved to ${relativePath} but contains zero parseable milestone lines, ` +
+              `so no milestones were registered in the DB. /gsd will report "No Active Milestone". ` +
+              `Rewrite PROJECT.md so the "Milestone Sequence" section uses canonical lines: ` +
+              `\`- [ ] M001: <Title> — <One-liner>\` (em-dash, double-dash \`--\`, or single-dash \`-\` separator), then re-call gsd_summary_save(PROJECT).`,
+          }],
+          details: {
+            operation: "save_summary",
+            path: relativePath,
+            artifact_type: params.artifact_type,
+            error: "milestone_registration_empty_parse",
+          },
+          isError: true,
+        };
+      }
+    }
 
     if (params.artifact_type === "CONTEXT" && !params.task_id) {
       try {
@@ -166,7 +263,13 @@ export async function executeSummarySave(
 
     return {
       content: [{ type: "text", text: `Saved ${params.artifact_type} artifact to ${relativePath}` }],
-      details: { operation: "save_summary", path: relativePath, artifact_type: params.artifact_type },
+      details: {
+        operation: "save_summary",
+        path: relativePath,
+        artifact_type: params.artifact_type,
+        content_source: contentSource,
+        ...(registeredMilestones.length > 0 ? { registeredMilestones } : {}),
+      },
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

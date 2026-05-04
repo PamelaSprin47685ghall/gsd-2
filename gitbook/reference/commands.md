@@ -53,6 +53,7 @@
 | `/gsd skill-health` | Skill lifecycle dashboard |
 | `/gsd hooks` | Show configured hooks |
 | `/gsd migrate` | Migrate v1 `.planning` to `.gsd` format |
+| `/gsd recover` | Explicitly reconstruct database hierarchy state from rendered markdown after database loss or corruption |
 
 ## Milestone Management
 

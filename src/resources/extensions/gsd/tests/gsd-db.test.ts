@@ -1,3 +1,5 @@
+// GSD Extension - Database regression tests.
+
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
@@ -11,6 +13,7 @@ import {
   wasDbOpenAttempted,
   getDbProvider,
   getDbStatus,
+  SCHEMA_VERSION,
   insertDecision,
   getDecisionById,
   insertRequirement,
@@ -28,7 +31,10 @@ import {
   getTask,
   getSliceTasks,
   checkpointDatabase,
+  refreshOpenDatabaseFromDisk,
+  tryCreateMemoriesFts,
 } from '../gsd-db.ts';
+import { _resetLogs, peekLogs, setStderrLoggingEnabled } from '../workflow-logger.ts';
 
 const _require = createRequire(import.meta.url);
 
@@ -101,7 +107,7 @@ describe('gsd-db', () => {
     // Check schema_version table
     const adapter = _getAdapter()!;
     const version = adapter.prepare('SELECT MAX(version) as version FROM schema_version').get();
-    assert.deepStrictEqual(version?.['version'], 22, 'schema version should be 22');
+    assert.deepStrictEqual(version?.['version'], SCHEMA_VERSION, `schema version should be ${SCHEMA_VERSION}`);
 
     // Check tables exist by querying them
     const dRows = adapter.prepare('SELECT count(*) as cnt FROM decisions').get();
@@ -909,6 +915,31 @@ describe('gsd-db', () => {
     closeDatabase();
   });
 
+  test('gsd-db: FTS5 unavailable warning normalizes provider typo', () => {
+    const previousStderr = setStderrLoggingEnabled(false);
+    _resetLogs();
+    try {
+      const ok = tryCreateMemoriesFts({
+        exec(): void {
+          throw new Error('no such moduel : fts5');
+        },
+        prepare(): never {
+          throw new Error('prepare should not be called');
+        },
+        close(): void {},
+      });
+
+      assert.equal(ok, false, 'FTS5 creation should report fallback');
+      const warning = peekLogs().find((entry) => entry.component === 'db' && entry.message.includes('FTS5 unavailable'));
+      assert.ok(warning, 'FTS5 fallback warning should be logged');
+      assert.match(warning!.message, /no such module: fts5/);
+      assert.doesNotMatch(warning!.message, /moduel/);
+    } finally {
+      _resetLogs();
+      setStderrLoggingEnabled(previousStderr);
+    }
+  });
+
   // ─── checkpointDatabase ────────────────────────────────────────────────────
 
   describe('checkpointDatabase', () => {
@@ -948,6 +979,71 @@ describe('gsd-db', () => {
       closeDatabase();
       // Must not throw
       assert.doesNotThrow(() => checkpointDatabase());
+    });
+  });
+
+  // ─── refreshOpenDatabaseFromDisk ───────────────────────────────────────────
+
+  describe('refreshOpenDatabaseFromDisk', () => {
+    test('refreshOpenDatabaseFromDisk: reopens the active file-backed database and sees external writes', (t) => {
+      const dbPath = tempDbPath();
+      t.after(() => cleanup(dbPath));
+
+      openDatabase(dbPath);
+      insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
+      insertSlice({
+        id: 'S01',
+        milestoneId: 'M001',
+        title: 'Slice 1',
+        status: 'pending',
+        sequence: 1,
+      });
+      insertTask({
+        id: 'T01',
+        milestoneId: 'M001',
+        sliceId: 'S01',
+        title: 'Task 1',
+        status: 'pending',
+        sequence: 1,
+      });
+
+      const adapterBefore = _getAdapter()!;
+
+      const externalDb = openRawSqliteForTest(dbPath);
+      try {
+        externalDb.exec(`
+          INSERT INTO tasks (milestone_id, slice_id, id, title, status, sequence)
+          VALUES ('M001', 'S01', 'T02', 'Task 2', 'pending', 2)
+        `);
+      } finally {
+        externalDb.close();
+      }
+
+      const visibleBeforeRefresh = getSliceTasks('M001', 'S01').map(task => task.id);
+      assert.ok(visibleBeforeRefresh.includes('T01'));
+
+      assert.equal(refreshOpenDatabaseFromDisk(), true);
+      assert.notEqual(_getAdapter(), adapterBefore, 'refresh must replace the active adapter rather than becoming a no-op');
+      const sliceTaskIds = getSliceTasks('M001', 'S01').map(task => task.id);
+      assert.deepEqual(sliceTaskIds, ['T01', 'T02']);
+      assert.equal(isDbAvailable(), true);
+    });
+
+    test('refreshOpenDatabaseFromDisk: refuses in-memory databases without closing them', () => {
+      openDatabase(':memory:');
+      insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
+
+      assert.equal(refreshOpenDatabaseFromDisk(), false);
+      assert.equal(isDbAvailable(), true);
+      assert.ok(_getAdapter()!.prepare("SELECT 1 FROM milestones WHERE id = 'M001'").get());
+
+      closeDatabase();
+    });
+
+    test('refreshOpenDatabaseFromDisk: is a no-op when no database is open', () => {
+      closeDatabase();
+      assert.equal(refreshOpenDatabaseFromDisk(), false);
+      assert.equal(isDbAvailable(), false);
     });
   });
 

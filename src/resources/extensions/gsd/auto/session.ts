@@ -21,7 +21,10 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent
 import type { GitServiceImpl } from "../git-service.js";
 import type { CaptureEntry } from "../captures.js";
 import type { BudgetAlertLevel } from "../auto-budget.js";
+import type { AutoOrchestrationModule } from "./contracts.js";
 import { resolveWorktreeProjectRoot } from "../worktree-root.js";
+import { normalizeRealPath } from "../paths.js";
+import type { MilestoneScope } from "../workspace.js";
 
 // ─── Exported Types ──────────────────────────────────────────────────────────
 
@@ -94,6 +97,23 @@ export class AutoSession {
   // ── Paths ────────────────────────────────────────────────────────────────
   basePath = "";
   originalBasePath = "";
+  // TODO(C8): remove basePath/originalBasePath once all readers use s.scope
+  scope: MilestoneScope | null = null;
+
+  // ── Coordination identity (Phase B — DB-backed coordination) ────────────
+  /**
+   * Worker registry ID set by registerAutoWorker() at session start. Used by
+   * heartbeatAutoWorker() each loop iteration and by recordDispatchClaim()
+   * to fence dispatch ledger writes against stale workers.
+   */
+  workerId: string | null = null;
+  /**
+   * Active milestone lease fencing token, set by claimMilestoneLease() inside
+   * worktree-resolver.enterMilestone(). Threaded into recordDispatchClaim()
+   * as milestone_lease_token so out-of-band dispatches by a stale worker
+   * are detectable.
+   */
+  milestoneLeaseToken: number | null = null;
   previousProjectRootEnv: string | null = null;
   hadProjectRootEnv = false;
   projectRootEnvCaptured = false;
@@ -210,6 +230,9 @@ export class AutoSession {
   /** Cleanup function returned by startCommandPolling(); null when not running. */
   commandPollingCleanup: (() => void) | null = null;
 
+  // ── Orchestration seam ───────────────────────────────────────────────────
+  orchestration: AutoOrchestrationModule | null = null;
+
   // ── Loop promise state ──────────────────────────────────────────────────
   // Per-unit resolve function and session-switch guard live at module level
   // in auto-loop.ts (_currentResolve, _sessionSwitchInFlight).
@@ -232,6 +255,24 @@ export class AutoSession {
     return resolveWorktreeProjectRoot(this.basePath, this.originalBasePath);
   }
 
+  /**
+   * Canonical project root for state-derivation reads AND writer paths.
+   *
+   * Prefers the realpath-normalized projectRoot from the MilestoneScope
+   * (introduced by PR #5236), falling back to resolveWorktreeProjectRoot
+   * during early lifecycle / engine-bypass paths where scope may be null.
+   *
+   * Always realpath-normalized so cache keys (e.g. deriveState's _stateCache)
+   * cannot drift across worktree↔project-root path-string variants for the
+   * same filesystem location.
+   */
+  get canonicalProjectRoot(): string {
+    const root =
+      this.scope?.workspace.projectRoot
+        ?? resolveWorktreeProjectRoot(this.basePath, this.originalBasePath);
+    return normalizeRealPath(root);
+  }
+
   reset(): void {
     this.clearTimers();
 
@@ -247,6 +288,9 @@ export class AutoSession {
     // Paths
     this.basePath = "";
     this.originalBasePath = "";
+    this.scope = null;
+    this.workerId = null;
+    this.milestoneLeaseToken = null;
     this.previousProjectRootEnv = null;
     this.hadProjectRootEnv = false;
     this.projectRootEnvCaptured = false;
@@ -314,10 +358,14 @@ export class AutoSession {
     // Remote command polling — cleanup must be called before reset (auto.ts stopAuto)
     this.commandPollingCleanup = null;
 
+    // Orchestration seam
+    this.orchestration = null;
+
     // Loop promise state lives in auto-loop.ts module scope
   }
 
   toJSON(): Record<string, unknown> {
+    const orchestrationStatus = this.orchestration?.getStatus();
     return {
       active: this.active,
       paused: this.paused,
@@ -327,6 +375,9 @@ export class AutoSession {
       activeRunDir: this.activeRunDir,
       currentMilestoneId: this.currentMilestoneId,
       currentUnit: this.currentUnit,
+      orchestrationPhase: orchestrationStatus?.phase,
+      orchestrationTransitionCount: orchestrationStatus?.transitionCount,
+      orchestrationLastTransitionAt: orchestrationStatus?.lastTransitionAt,
       unitDispatchCount: Object.fromEntries(this.unitDispatchCount),
     };
   }

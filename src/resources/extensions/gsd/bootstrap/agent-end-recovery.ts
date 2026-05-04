@@ -12,7 +12,7 @@ import { clearPathCache } from "../paths.js";
 import { getAutoDashboardData, getAutoModeStartModel, isAutoActive, pauseAuto, setCurrentDispatchedModelId } from "../auto.js";
 import { getNextFallbackModel, resolveModelWithFallbacksForUnit } from "../preferences.js";
 import { pauseAutoForProviderError } from "../provider-error-pause.js";
-import { isSessionSwitchInFlight, resolveAgentEnd } from "../auto-loop.js";
+import { isSessionSwitchInFlight, resolveAgentEnd } from "../auto/resolve.js";
 import { resolveModelId } from "../auto-model-selection.js";
 import { resolveProjectRoot } from "../worktree.js";
 import { clearDiscussionFlowState } from "./write-gate.js";
@@ -54,6 +54,19 @@ function resolveAgentEndBasePath(): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+export function _buildAbortedPauseContext(lastMsg: { errorMessage?: unknown }): {
+  message: string;
+  category: "aborted";
+  isTransient: true;
+} {
+  const hasErrorMessage = Object.prototype.hasOwnProperty.call(lastMsg, "errorMessage") && !!lastMsg.errorMessage;
+  return {
+    message: hasErrorMessage ? String(lastMsg.errorMessage) : "Operation aborted",
+    category: "aborted",
+    isTransient: true,
+  };
 }
 
 async function pauseTransientWithBackoff(
@@ -105,12 +118,17 @@ export async function handleAgentEnd(
   // rejected" loop even though the files are on disk.
   clearPathCache();
 
-  if (await checkDeepProjectSetupAfterTurn(event, ctx, resolveAgentEndBasePath())) {
-    return;
+  try {
+    if (await checkDeepProjectSetupAfterTurn(event, ctx, resolveAgentEndBasePath())) {
+      return;
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logWarning("bootstrap", `checkDeepProjectSetupAfterTurn failed: ${message}`);
   }
 
   if (checkAutoStartAfterDiscuss()) {
-    clearDiscussionFlowState();
+    clearDiscussionFlowState(resolveAgentEndBasePath() ?? process.cwd());
     return;
   }
 
@@ -154,7 +172,7 @@ export async function handleAgentEnd(
       return;
     }
 
-    await pauseAuto(ctx, pi);
+    await pauseAuto(ctx, pi, _buildAbortedPauseContext(lastMsg as { errorMessage?: unknown }));
     return;
   }
   if (lastMsg && "stopReason" in lastMsg && lastMsg.stopReason === "error") {

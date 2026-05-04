@@ -309,6 +309,7 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
     ctx.modelRegistry as Parameters<typeof resolveExecutorContextWindow>[0],
     prefs as Parameters<typeof resolveExecutorContextWindow>[1],
     ctx.model?.contextWindow,
+    ctx.model?.provider,
   );
   const continueHereThreshold = computeBudgets(executorContextWindow).continueThresholdPercent;
   s.continueHereHandle = setInterval(() => {

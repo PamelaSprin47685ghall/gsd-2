@@ -105,6 +105,8 @@ GSD connects to external MCP servers configured in project files:
 
 Verify from a GSD session: `mcp_servers` → `mcp_discover` → `mcp_call`.
 
+`secure_env_collect` will not set MCP server runtime variables such as `GSD_WORKFLOW_EXECUTORS_MODULE`, `GSD_WORKFLOW_PROJECT_ROOT`, `GSD_CLI_PATH`, `NODE_OPTIONS`, `NODE_PATH`, or `PATH`; configure those in the operator environment or MCP config. Local dotenv writes are hydrated into the current MCP server process, while Vercel and Convex pushes are remote-only and are not added to `process.env`.
+
 ## Models
 
 Per-phase model selection:
