@@ -1509,9 +1509,12 @@ export class AgentSession {
 			if (images.length === 0) images = undefined;
 		}
 
-		// Use prompt() with expandPromptTemplates: false to skip command handling and template expansion
+		// Use prompt() with expandPromptTemplates based on content.
+		// Commands starting with / should be parsed as commands (expandPromptTemplates: true).
+		// Other extension messages should not expand templates (expandPromptTemplates: false).
+		const expandPromptTemplates = text.startsWith("/");
 		await this.prompt(text, {
-			expandPromptTemplates: false,
+			expandPromptTemplates,
 			streamingBehavior: options?.deliverAs,
 			images,
 			source: "extension",

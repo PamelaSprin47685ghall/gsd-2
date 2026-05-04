@@ -759,28 +759,90 @@ export class ExtensionRunner {
 	): Promise<void> {
 		const ctx = this.createContext();
 
+		// Build flat execution plan from all extensions
+		const plan: Array<{
+			handler: (...args: unknown[]) => Promise<unknown>;
+			extPath: string;
+			captured: boolean;
+		}> = [];
+
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(eventType);
 			if (!handlers || handlers.length === 0) continue;
-
 			for (const handler of handlers) {
+				plan.push({ handler, extPath: ext.path, captured: false });
+			}
+		}
+
+		if (plan.length === 0) return;
+
+		// Absorb control — capture handlers by extension path
+		const absorb = (
+			match: string | RegExp | ((id: string) => boolean),
+		): Array<(...args: unknown[]) => Promise<unknown>> => {
+			const captured: Array<(...args: unknown[]) => Promise<unknown>> = [];
+			for (const p of plan) {
+				if (p.captured) continue;
+				const isMatch = typeof match === "function"
+					? match(p.extPath)
+					: match instanceof RegExp
+						? match.test(p.extPath)
+						: p.extPath === match;
+				if (isMatch) {
+					p.captured = true;
+					captured.push(p.handler);
+				}
+			}
+			return captured;
+		};
+
+		(ctx as any).absorb = absorb;
+
+		try {
+			// Pass 1 — Negotiation: every handler with .negotiate participates,
+			// regardless of order (captured handlers still get a say)
+			for (const p of plan) {
+				const negotiate = (p.handler as any).negotiate;
+				if (typeof negotiate === "function") {
+					try {
+						const event = getEvent();
+						await negotiate(event, ctx);
+					} catch (err) {
+						const message = err instanceof Error ? err.message : String(err);
+						const stack = err instanceof Error ? err.stack : undefined;
+						this.emitError({
+							extensionPath: p.extPath,
+							event: eventType,
+							error: message,
+							stack,
+						});
+					}
+				}
+			}
+
+			// Pass 2 — Execution: only survivors run
+			for (const p of plan) {
+				if (p.captured) continue;
 				try {
 					const event = getEvent();
-					const handlerResult = await handler(event, ctx);
-					const action = processResult(handlerResult, ext.path);
+					const handlerResult = await p.handler(event, ctx);
+					const action = processResult(handlerResult, p.extPath);
 					if (action.done) return;
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
-						extensionPath: ext.path,
+						extensionPath: p.extPath,
 						event: eventType,
 						error: message,
 						stack,
 					});
 				}
 			}
+		} finally {
+			delete (ctx as any).absorb;
 		}
+
 	}
 
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
