@@ -263,10 +263,21 @@ describe("workflow MCP tools", () => {
         "workflow MCP schema must advertise milestone_id as optional for root artifacts",
       );
 
+      const projectFixture = [
+        "# Project",
+        "",
+        "Root artifact",
+        "",
+        "## Milestone Sequence",
+        "",
+        "- [ ] M001: Foundation - Establish the first runnable slice.",
+        "",
+      ].join("\n");
+
       const result = await tool!.handler({
         projectDir: base,
         artifact_type: "PROJECT",
-        content: "# Project\n\nRoot artifact",
+        content: projectFixture,
       });
 
       const text = (result as any).content[0].text as string;
@@ -277,7 +288,7 @@ describe("workflow MCP tools", () => {
       );
       assert.equal(
         readFileSync(join(base, ".gsd", "PROJECT.md"), "utf-8"),
-        "# Project\n\nRoot artifact",
+        projectFixture,
       );
     } finally {
       cleanup(base);
